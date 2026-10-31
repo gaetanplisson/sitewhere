@@ -18,12 +18,11 @@ package com.sitewhere.registration.kafka;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.streams.StreamsBuilder;
-import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
 
 import com.sitewhere.grpc.kafka.serdes.SiteWhereSerdes;
-import com.sitewhere.microservice.kafka.KafkaStreamPipeline;
+import com.sitewhere.microservice.kafka.DirectKafkaConsumer;
 import com.sitewhere.registration.spi.kafka.IRegistrationEventsPipeline;
 import com.sitewhere.spi.SiteWhereException;
 import com.sitewhere.spi.microservice.lifecycle.ILifecycleProgressMonitor;
@@ -31,18 +30,10 @@ import com.sitewhere.spi.microservice.lifecycle.ILifecycleProgressMonitor;
 /**
  * Kafka Streams pipeline for handling device registration events.
  */
-public class RegistrationEventsPipeline extends KafkaStreamPipeline implements IRegistrationEventsPipeline {
+public class RegistrationEventsPipeline extends DirectKafkaConsumer implements IRegistrationEventsPipeline {
 
     /** Handles registration events from stream */
     private RegistrationEventsProcessorSupplier registrationEventsProcessorSupplier;
-
-    /*
-     * @see com.sitewhere.microservice.kafka.KafkaStreamPipeline#getPipelineName()
-     */
-    @Override
-    public String getPipelineName() {
-	return "events";
-    }
 
     /*
      * @see
@@ -63,10 +54,12 @@ public class RegistrationEventsPipeline extends KafkaStreamPipeline implements I
      * apache.kafka.streams.StreamsBuilder)
      */
     @Override
-    public void buildStreams(StreamsBuilder builder) {
-	builder.stream(getSourceTopicNames(),
-		Consumed.with(Serdes.String(), SiteWhereSerdes.forDeviceRegistrationPayload()))
-		.process(getRegistrationEventsProcessorSupplier(), new String[0]);
+    public void attemptToProcess(TopicPartition topicPartition, List<ConsumerRecord<String, byte[]>> records)
+	    throws SiteWhereException {
+	for (ConsumerRecord<String, byte[]> record : records) {
+	    getRegistrationEventsProcessorSupplier().get().process(record.key(), SiteWhereSerdes
+		    .forDeviceRegistrationPayload().deserializer().deserialize(record.topic(), record.value()));
+	}
     }
 
     /*

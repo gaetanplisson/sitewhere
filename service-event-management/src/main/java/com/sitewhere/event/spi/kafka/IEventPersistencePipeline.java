@@ -15,10 +15,10 @@
  */
 package com.sitewhere.event.spi.kafka;
 
-import com.sitewhere.spi.microservice.kafka.IKafkaStreamPipeline;
+import com.sitewhere.spi.microservice.kafka.IMicroserviceKafkaConsumer;
 
 /**
  * Kafka stream pipeline for persisting decoded, preprocessed events.
  */
-public interface IEventPersistencePipeline extends IKafkaStreamPipeline {
+public interface IEventPersistencePipeline extends IMicroserviceKafkaConsumer {
 }

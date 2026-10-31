@@ -22,18 +22,18 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.streams.StreamsBuilder;
-import org.apache.kafka.streams.kstream.Consumed;
-import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.kstream.Predicate;
-import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.streams.KeyValue;
 
+import com.sitewhere.grpc.event.EventModelMarshaler;
 import com.sitewhere.grpc.kafka.serdes.SiteWhereSerdes;
 import com.sitewhere.grpc.model.DeviceEventModel.GDecodedEventPayload;
+import com.sitewhere.grpc.model.DeviceEventModel.GPreprocessedEventPayload;
 import com.sitewhere.inbound.spi.kafka.IDecodedEventsPipeline;
 import com.sitewhere.inbound.spi.microservice.IInboundProcessingTenantEngine;
-import com.sitewhere.microservice.kafka.KafkaStreamPipeline;
+import com.sitewhere.microservice.kafka.DirectKafkaConsumer;
+import com.sitewhere.microservice.kafka.MicroserviceKafkaProducer;
 import com.sitewhere.microservice.kafka.KafkaTopicWaiter;
 import com.sitewhere.spi.SiteWhereException;
 import com.sitewhere.spi.microservice.lifecycle.ILifecycleProgressMonitor;
@@ -42,7 +42,7 @@ import com.sitewhere.spi.microservice.lifecycle.ITenantEngineLifecycleComponent;
 /**
  * Kafka pipeline for handling decoded events (usually from event sources).
  */
-public class DecodedEventsPipeline extends KafkaStreamPipeline implements IDecodedEventsPipeline {
+public class DecodedEventsPipeline extends DirectKafkaConsumer implements IDecodedEventsPipeline {
 
     /** Mapper that looks up a device by token */
     private DeviceLookupMapper deviceLookupMapper;
@@ -62,13 +62,11 @@ public class DecodedEventsPipeline extends KafkaStreamPipeline implements IDecod
     /** Executor service for waiter thread */
     ExecutorService waiterService;
 
-    /*
-     * @see com.sitewhere.microservice.kafka.KafkaStreamPipeline#getPipelineName()
-     */
-    @Override
-    public String getPipelineName() {
-	return "decoded";
-    }
+    /** Producer for events of unregistered devices */
+    private TopicProducer unregisteredProducer;
+
+    /** Producer for preprocessed inbound events */
+    private TopicProducer inboundEventsProducer;
 
     /*
      * @see
@@ -91,35 +89,31 @@ public class DecodedEventsPipeline extends KafkaStreamPipeline implements IDecod
      * apache.kafka.streams.StreamsBuilder)
      */
     @Override
-    @SuppressWarnings("unchecked")
-    public void buildStreams(StreamsBuilder builder) {
-	// Pipeline handles both event source decoded events and reprocess events.
-	KStream<String, GDecodedEventPayload> input = builder.stream(getSourceTopicNames(),
-		Consumed.with(Serdes.String(), SiteWhereSerdes.forDecodedEventPayload()));
+    public void attemptToProcess(TopicPartition topicPartition, List<ConsumerRecord<String, byte[]>> records)
+	    throws SiteWhereException {
+	for (ConsumerRecord<String, byte[]> record : records) {
+	    GDecodedEventPayload payload = SiteWhereSerdes.forDecodedEventPayload().deserializer()
+		    .deserialize(record.topic(), record.value());
 
-	// Attempt to resolve device and split stream based on resolution.
-	KStream<UUID, InboundEventContext> deviceResolver = input.map(getDeviceLookupMapper());
+	    // Attempt to resolve device.
+	    KeyValue<UUID, InboundEventContext> resolved = getDeviceLookupMapper().apply(record.key(), payload);
 
-	// Create branches based on whether device was resolved.
-	Predicate<UUID, InboundEventContext> deviceFound = (key, value) -> value.getDevice() != null;
-	Predicate<UUID, InboundEventContext> deviceNotFound = (key, value) -> true;
-	KStream<UUID, InboundEventContext>[] deviceBranches = deviceResolver.branch(deviceFound, deviceNotFound);
-	KStream<UUID, InboundEventContext> deviceFoundBranch = deviceBranches[0];
-	KStream<UUID, InboundEventContext> deviceNotFoundBranch = deviceBranches[1];
+	    // Route unresolved device tokens to their own topic.
+	    if (resolved.value.getDevice() == null) {
+		unregisteredProducer.send(resolved.key.toString(), record.value());
+		continue;
+	    }
 
-	// Route unresolved device tokens to their own topic.
-	String unregisteredTopic = getMicroservice().getKafkaTopicNaming()
-		.getUnregisteredDeviceEventsTopic(getTenantEngine().getTenantResource());
-	deviceNotFoundBranch.mapValues((key, value) -> value.getDecodedEventPayload()).to(unregisteredTopic,
-		Produced.with(Serdes.UUID(), SiteWhereSerdes.forDecodedEventPayload()));
-
-	// Create separate "preprocessed event" payloads for each assignment and
-	// forward to inbound events topic.
-	String inboundEventsTopic = getMicroservice().getKafkaTopicNaming()
-		.getInboundEventsTopic(getTenantEngine().getTenantResource());
-	deviceFoundBranch.map(getDeviceAssignmentsLookupMapper()).map(getPreprocessedEventMapper())
-		.flatMapValues((key, value) -> value)
-		.to(inboundEventsTopic, Produced.with(Serdes.UUID(), SiteWhereSerdes.forPreprocessedEventPayload()));
+	    // Create separate "preprocessed event" payloads for each assignment and
+	    // forward to inbound events topic.
+	    KeyValue<UUID, InboundEventContext> assigned = getDeviceAssignmentsLookupMapper().apply(resolved.key,
+		    resolved.value);
+	    for (GPreprocessedEventPayload preproc : getPreprocessedEventMapper().apply(assigned.key,
+		    assigned.value).value) {
+		inboundEventsProducer.send(assigned.key.toString(),
+			EventModelMarshaler.buildPreprocessedEventPayloadMessage(preproc));
+	    }
+	}
     }
 
     /*
@@ -135,11 +129,17 @@ public class DecodedEventsPipeline extends KafkaStreamPipeline implements IDecod
 		((IInboundProcessingTenantEngine) getTenantEngine()).getActiveConfiguration());
 	this.preprocessedEventMapper = new PreprocessedEventMapper(
 		((IInboundProcessingTenantEngine) getTenantEngine()).getActiveConfiguration());
+	this.unregisteredProducer = new TopicProducer(getMicroservice().getKafkaTopicNaming()
+		.getUnregisteredDeviceEventsTopic(getTenantEngine().getTenantResource()));
+	this.inboundEventsProducer = new TopicProducer(
+		getMicroservice().getKafkaTopicNaming().getInboundEventsTopic(getTenantEngine().getTenantResource()));
 
 	super.initialize(monitor);
 	initializeNestedComponent(getDeviceLookupMapper(), monitor, true);
 	initializeNestedComponent(getDeviceAssignmentsLookupMapper(), monitor, true);
 	initializeNestedComponent(getPreprocessedEventMapper(), monitor, true);
+	initializeNestedComponent(unregisteredProducer, monitor, true);
+	initializeNestedComponent(inboundEventsProducer, monitor, true);
     }
 
     /**
@@ -176,6 +176,8 @@ public class DecodedEventsPipeline extends KafkaStreamPipeline implements IDecod
 	startNestedComponent(getDeviceLookupMapper(), monitor, true);
 	startNestedComponent(getDeviceAssignmentsLookupMapper(), monitor, true);
 	startNestedComponent(getPreprocessedEventMapper(), monitor, true);
+	startNestedComponent(unregisteredProducer, monitor, true);
+	startNestedComponent(inboundEventsProducer, monitor, true);
 
 	// Wait for Kafka topics to be created/validated.
 	waitForTopics();
@@ -189,9 +191,28 @@ public class DecodedEventsPipeline extends KafkaStreamPipeline implements IDecod
     @Override
     public void stop(ILifecycleProgressMonitor monitor) throws SiteWhereException {
 	super.stop(monitor);
+	stopNestedComponent(inboundEventsProducer, monitor);
+	stopNestedComponent(unregisteredProducer, monitor);
 	stopNestedComponent(getPreprocessedEventMapper(), monitor);
 	stopNestedComponent(getDeviceAssignmentsLookupMapper(), monitor);
 	stopNestedComponent(getDeviceLookupMapper(), monitor);
+    }
+
+    /**
+     * Producer that sends to a fixed topic.
+     */
+    private class TopicProducer extends MicroserviceKafkaProducer<String, byte[]> {
+
+	private String topic;
+
+	public TopicProducer(String topic) {
+	    this.topic = topic;
+	}
+
+	@Override
+	public String getTargetTopicName() {
+	    return topic;
+	}
     }
 
     /**

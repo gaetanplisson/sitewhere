@@ -17,33 +17,25 @@ package com.sitewhere.commands.kafka;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
-import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.streams.StreamsBuilder;
-import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
 
 import com.sitewhere.commands.spi.kafka.IEnrichedCommandInvocationsPipeline;
 import com.sitewhere.grpc.kafka.serdes.SiteWhereSerdes;
-import com.sitewhere.microservice.kafka.KafkaStreamPipeline;
+import com.sitewhere.microservice.kafka.DirectKafkaConsumer;
 import com.sitewhere.spi.SiteWhereException;
 import com.sitewhere.spi.microservice.lifecycle.ILifecycleProgressMonitor;
 
 /**
  * Kafka Streams pipeline for handling command invocation events.
  */
-public class EnrichedCommandInvocationsPipeline extends KafkaStreamPipeline
+public class EnrichedCommandInvocationsPipeline extends DirectKafkaConsumer
 	implements IEnrichedCommandInvocationsPipeline {
 
     /** Handles command invocation events from stream */
     private CommandInvocationsProcessorSupplier commandInvocationsProcessorSupplier;
-
-    /*
-     * @see com.sitewhere.microservice.kafka.KafkaStreamPipeline#getPipelineName()
-     */
-    @Override
-    public String getPipelineName() {
-	return "events";
-    }
 
     /*
      * @see
@@ -64,9 +56,12 @@ public class EnrichedCommandInvocationsPipeline extends KafkaStreamPipeline
      * apache.kafka.streams.StreamsBuilder)
      */
     @Override
-    public void buildStreams(StreamsBuilder builder) {
-	builder.stream(getSourceTopicNames(), Consumed.with(Serdes.UUID(), SiteWhereSerdes.forProcessedEventPayload()))
-		.process(getCommandInvocationsProcessorSupplier(), new String[0]);
+    public void attemptToProcess(TopicPartition topicPartition, List<ConsumerRecord<String, byte[]>> records)
+	    throws SiteWhereException {
+	for (ConsumerRecord<String, byte[]> record : records) {
+	    getCommandInvocationsProcessorSupplier().get().process(UUID.fromString(record.key()),
+		    SiteWhereSerdes.forProcessedEventPayload().deserializer().deserialize(record.topic(), record.value()));
+	}
     }
 
     /*

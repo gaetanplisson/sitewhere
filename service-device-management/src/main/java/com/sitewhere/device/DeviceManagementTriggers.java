@@ -117,7 +117,8 @@ public class DeviceManagementTriggers extends DeviceManagementDecorator {
 	payload.setEventCreateRequest(request);
 
 	byte[] marshaled = EventModelMarshaler.buildDecodedEventPayloadMessage(payload);
-	getDeviceInteractionEventsProducer().send(device.getId(), marshaled);
+	// keyed by device token, as the decoded events of the event sources
+	getDeviceInteractionEventsProducer().send(device.getToken(), marshaled);
     }
 
     protected IDeviceInteractionEventsProducer getDeviceInteractionEventsProducer() {
