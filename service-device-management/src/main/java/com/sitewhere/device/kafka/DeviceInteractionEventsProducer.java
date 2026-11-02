@@ -15,6 +15,10 @@
  */
 package com.sitewhere.device.kafka;
 
+import java.util.UUID;
+
+import org.apache.kafka.common.serialization.Serdes;
+
 import com.sitewhere.device.spi.kafka.IDeviceInteractionEventsProducer;
 import com.sitewhere.microservice.kafka.MicroserviceKafkaProducer;
 import com.sitewhere.spi.SiteWhereException;
@@ -22,8 +26,17 @@ import com.sitewhere.spi.SiteWhereException;
 /**
  * Kafka producer that sends events triggered by device management interactions.
  */
-public class DeviceInteractionEventsProducer extends MicroserviceKafkaProducer<String, byte[]>
+public class DeviceInteractionEventsProducer extends MicroserviceKafkaProducer<UUID, byte[]>
 	implements IDeviceInteractionEventsProducer {
+
+    /*
+     * @see
+     * com.sitewhere.microservice.kafka.MicroserviceKafkaProducer#getKeySerializer()
+     */
+    @Override
+    public Class<?> getKeySerializer() {
+	return Serdes.UUID().serializer().getClass();
+    }
 
     /*
      * @see com.sitewhere.spi.microservice.kafka.IMicroserviceKafkaProducer#
@@ -31,9 +44,6 @@ public class DeviceInteractionEventsProducer extends MicroserviceKafkaProducer<S
      */
     @Override
     public String getTargetTopicName() throws SiteWhereException {
-	// Decoded event payloads: those of the event sources, preprocessed by inbound processing (event management
-	// reads preprocessed payloads from the inbound events topic)
-	return getMicroservice().getKafkaTopicNaming()
-		.getEventSourceDecodedEventsTopic(getTenantEngine().getTenantResource());
+	return getMicroservice().getKafkaTopicNaming().getInboundEventsTopic(getTenantEngine().getTenantResource());
     }
 }
