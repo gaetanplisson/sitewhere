@@ -19,7 +19,7 @@ ext['git.revision.abbrev'] = ext.git.head().abbreviatedId
 ext['docker.base.image'] = 'openjdk:8-jre-alpine'
 ext['docker.maintainer'] = 'admin@sitewhere.com'
 
-ext['sitewhere.microservice.api.version'] = '3.0.11e'
+ext['sitewhere.microservice.api.version'] = '3.0.11f'
 ext['sitewhere.integration.api.version'] = '3.0.2'
 ext['kafka.version'] = '2.0.0'
 ext['protobuf.version'] = '3.5.1'
@@ -140,9 +140,9 @@ subprojects {
 	task dockerImage(type: com.bmuschko.gradle.docker.tasks.image.DockerBuildImage, dependsOn: copyQuarkusToDocker) {
 	    inputDir = project.file('build/docker')
 		if(!project.hasProperty("debug")) {
-		    tags = ["${dockerRepository}/grosinosky/${project.name}:${version}"]
+		    tags = ["${dockerRepository}/${dockerNamespace}/${project.name}:${version}"]
 		} else {
-		    tags = ["${dockerRepository}/grosinosky/${project.name}:debug-${version}"]		
+		    tags = ["${dockerRepository}/${dockerNamespace}/${project.name}:debug-${version}"]		
 		}
 	}
 
@@ -152,9 +152,9 @@ subprojects {
 	}
 */
 	task dockerPushImage(type: Exec, dependsOn: dockerImage) {
-		println "${dockerRepository}/grosinosky/${project.name}:${version}"
+		println "${dockerRepository}/${dockerNamespace}/${project.name}:${version}"
 
-		commandLine = ['docker', 'push', "${dockerRepository}/grosinosky/${project.name}:${version}"]
+		commandLine = ['docker', 'push', "${dockerRepository}/${dockerNamespace}/${project.name}:${version}"]
 		
 	}
 

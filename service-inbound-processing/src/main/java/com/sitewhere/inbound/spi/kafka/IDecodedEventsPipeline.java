@@ -15,10 +15,10 @@
  */
 package com.sitewhere.inbound.spi.kafka;
 
-import com.sitewhere.spi.microservice.kafka.IKafkaStreamPipeline;
+import com.sitewhere.spi.microservice.kafka.IMicroserviceKafkaConsumer;
 
 /**
  * Kafka stream pipeline for processing decoded events.
  */
-public interface IDecodedEventsPipeline extends IKafkaStreamPipeline {
+public interface IDecodedEventsPipeline extends IMicroserviceKafkaConsumer {
 }

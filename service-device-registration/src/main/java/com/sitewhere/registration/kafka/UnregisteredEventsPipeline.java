@@ -18,12 +18,11 @@ package com.sitewhere.registration.kafka;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.streams.StreamsBuilder;
-import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
 
 import com.sitewhere.grpc.kafka.serdes.SiteWhereSerdes;
-import com.sitewhere.microservice.kafka.KafkaStreamPipeline;
+import com.sitewhere.microservice.kafka.DirectKafkaConsumer;
 import com.sitewhere.registration.spi.kafka.IUnregisteredEventsPipeline;
 import com.sitewhere.spi.SiteWhereException;
 import com.sitewhere.spi.microservice.lifecycle.ILifecycleProgressMonitor;
@@ -31,18 +30,10 @@ import com.sitewhere.spi.microservice.lifecycle.ILifecycleProgressMonitor;
 /**
  * Kafka Streams pipeline for handling events for unregistered devices.
  */
-public class UnregisteredEventsPipeline extends KafkaStreamPipeline implements IUnregisteredEventsPipeline {
+public class UnregisteredEventsPipeline extends DirectKafkaConsumer implements IUnregisteredEventsPipeline {
 
     /** Handles processing of events for unregistered devices */
     private UnregisteredEventsProcessorSupplier unregisteredEventsProcessorSupplier;
-
-    /*
-     * @see com.sitewhere.microservice.kafka.KafkaStreamPipeline#getPipelineName()
-     */
-    @Override
-    public String getPipelineName() {
-	return "unregistered";
-    }
 
     /*
      * @see
@@ -63,10 +54,12 @@ public class UnregisteredEventsPipeline extends KafkaStreamPipeline implements I
      * apache.kafka.streams.StreamsBuilder)
      */
     @Override
-    public void buildStreams(StreamsBuilder builder) {
-	// Pipeline handles both event source decoded events and reprocess events.
-	builder.stream(getSourceTopicNames(), Consumed.with(Serdes.String(), SiteWhereSerdes.forDecodedEventPayload()))
-		.process(getUnregisteredEventsProcessorSupplier(), new String[0]);
+    public void attemptToProcess(TopicPartition topicPartition, List<ConsumerRecord<String, byte[]>> records)
+	    throws SiteWhereException {
+	for (ConsumerRecord<String, byte[]> record : records) {
+	    getUnregisteredEventsProcessorSupplier().get().process(record.key(),
+		    SiteWhereSerdes.forDecodedEventPayload().deserializer().deserialize(record.topic(), record.value()));
+	}
     }
 
     /*

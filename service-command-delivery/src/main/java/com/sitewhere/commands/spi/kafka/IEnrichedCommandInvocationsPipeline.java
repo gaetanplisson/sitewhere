@@ -15,10 +15,10 @@
  */
 package com.sitewhere.commands.spi.kafka;
 
-import com.sitewhere.spi.microservice.kafka.IKafkaStreamPipeline;
+import com.sitewhere.spi.microservice.kafka.IMicroserviceKafkaConsumer;
 
 /**
  * Kafka pipeline that processes command invocation events.
  */
-public interface IEnrichedCommandInvocationsPipeline extends IKafkaStreamPipeline {
+public interface IEnrichedCommandInvocationsPipeline extends IMicroserviceKafkaConsumer {
 }

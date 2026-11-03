@@ -17,15 +17,15 @@ package com.sitewhere.event.kafka;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
-import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.streams.StreamsBuilder;
-import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
 
 import com.sitewhere.event.spi.kafka.IEventPersistencePipeline;
 import com.sitewhere.event.spi.microservice.IEventManagementTenantEngine;
 import com.sitewhere.grpc.kafka.serdes.SiteWhereSerdes;
-import com.sitewhere.microservice.kafka.KafkaStreamPipeline;
+import com.sitewhere.microservice.kafka.DirectKafkaConsumer;
 import com.sitewhere.spi.SiteWhereException;
 import com.sitewhere.spi.microservice.lifecycle.ILifecycleProgressMonitor;
 
@@ -33,18 +33,10 @@ import com.sitewhere.spi.microservice.lifecycle.ILifecycleProgressMonitor;
  * Kafka pipeline for persisting inbound events (usually decoded from event
  * sources).
  */
-public class EventPersistencePipeline extends KafkaStreamPipeline implements IEventPersistencePipeline {
+public class EventPersistencePipeline extends DirectKafkaConsumer implements IEventPersistencePipeline {
 
     /** Applies event persistence logic to preprocessed event streams */
     private EventPersistenceMapper eventPersistenceMapper;
-
-    /*
-     * @see com.sitewhere.microservice.kafka.KafkaStreamPipeline#getPipelineName()
-     */
-    @Override
-    public String getPipelineName() {
-	return "persistence";
-    }
 
     /*
      * @see
@@ -65,11 +57,12 @@ public class EventPersistencePipeline extends KafkaStreamPipeline implements IEv
      * apache.kafka.streams.StreamsBuilder)
      */
     @Override
-    public void buildStreams(StreamsBuilder builder) {
-	// Pipeline handles both event source decoded events and reprocess events.
-	builder.stream(getSourceTopicNames(),
-		Consumed.with(Serdes.UUID(), SiteWhereSerdes.forPreprocessedEventPayload()))
-		.map(getEventPersistenceMapper());
+    public void attemptToProcess(TopicPartition topicPartition, List<ConsumerRecord<String, byte[]>> records)
+	    throws SiteWhereException {
+	for (ConsumerRecord<String, byte[]> record : records) {
+	    getEventPersistenceMapper().apply(UUID.fromString(record.key()), SiteWhereSerdes
+		    .forPreprocessedEventPayload().deserializer().deserialize(record.topic(), record.value()));
+	}
     }
 
     /*

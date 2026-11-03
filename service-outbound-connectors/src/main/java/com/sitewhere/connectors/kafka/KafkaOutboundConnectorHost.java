@@ -17,7 +17,6 @@ package com.sitewhere.connectors.kafka;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,8 +25,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.common.TopicPartition;
 
 import com.sitewhere.connectors.spi.IOutboundConnector;
@@ -160,15 +157,6 @@ public class KafkaOutboundConnectorHost extends MicroserviceKafkaConsumer {
 	if (getOutboundConnector().getLifecycleStatus() == LifecycleStatus.Started) {
 	    if (records.size() > 0) {
 		getBatchProcessors().execute(new TopicBatchProcessor(this, topicPartition, records));
-
-		// Send new offset information.
-		getConsumer().commitAsync(new OffsetCommitCallback() {
-		    public void onComplete(Map<TopicPartition, OffsetAndMetadata> offsets, Exception e) {
-			if (e != null) {
-			    getLogger().error("Commit failed for offsets " + offsets, e);
-			}
-		    }
-		});
 	    }
 	} else {
 	    getLogger().warn("Skipping record batch due to outbound connector not in started state.");
