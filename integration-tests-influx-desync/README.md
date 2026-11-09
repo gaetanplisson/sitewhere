@@ -56,12 +56,12 @@ Variables utiles :
 
 Autres commandes : `just delete-kind` (suppression du cluster),
 `just status` (état du déploiement), `just restart-microservices [services...]`
-(redémarrage un par un, en attendant la fin du démarrage de chacun ; event-management
-y tourne sur l'image `async`, retirée à chaque fois), `just publish-image` (build
-d'event-management depuis cette branche et push du tag `async`, l'image par défaut
-de l'environnement de test, aussi appliquée par `deploy-kind`),
-`just publish-debug-image` (même chose en mode debug, tag `debug-async`, à utiliser
-avec `EVENT_IMAGE_TAG=debug-async`), `just reset` (suppression de l'instance et
+(redémarrage un par un, en attendant la fin du démarrage de chacun),
+`just publish-image` (build d'event-management depuis cette branche et push du tag
+`3.0.5`, celui que `swctl` donne aux microservices à la création de l'instance),
+`just publish-debug-image` (même chose en mode debug, tag `debug-async` ; pour
+l'exécuter, le publier sous le tag de l'instance avec `DEBUG_IMAGE_TAG=3.0.5`),
+`just reset` (suppression de l'instance et
 des bases `tenant_*`, puis redéploiement par `deploy-kind` — l'infrastructure
 est conservée), `just undeploy` (suppression instance + interfaces +
 infrastructure).

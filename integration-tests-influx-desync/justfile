@@ -14,14 +14,12 @@ INSTANCE_REPO := env("INSTANCE_REPO", "gaetanplisson")
 # Microservices kept running by deploy-kind, restarted by restart-microservices
 MICROSERVICES := "instance-management device-management asset-management event-management inbound-processing event-sources"
 # Images of event-management built from this branch by publish-image and
-# publish-debug-image. The test environment runs EVENT_IMAGE_TAG: use the debug image
-# with EVENT_IMAGE_TAG=debug-async
+# publish-debug-image. swctl creates the microservices with the tag 3.0.5: an image
+# published under another tag is not used by the instance
 EVENT_SERVICE := "event-management"
-RELEASE_IMAGE_TAG := env("RELEASE_IMAGE_TAG", "async")
+RELEASE_IMAGE_TAG := "3.0.5"
 DEBUG_IMAGE_TAG := env("DEBUG_IMAGE_TAG", "debug-async")
-EVENT_IMAGE_TAG := env("EVENT_IMAGE_TAG", RELEASE_IMAGE_TAG)
 EVENT_IMAGE_NAME := "docker.io/" + INSTANCE_REPO + "/service-" + EVENT_SERVICE
-EVENT_IMAGE := EVENT_IMAGE_NAME + ":" + EVENT_IMAGE_TAG
 ROOT_DIR := justfile_directory() / ".."
 
 # Justfile of the SiteWhere deployment in the deploiments submodule
@@ -52,10 +50,9 @@ delete-kind:
 
 # Deploy SiteWhere on the Kind cluster: passthrough echarde WasmPlugins, no
 # Colvert, only device-management and event-management kept running (see the
-# deploy-kind recipe of the deploiments Justfile), with event-management on
-# EVENT_IMAGE, which publish-image must have pushed
+# deploy-kind recipe of the deploiments Justfile)
 deploy-kind:
-    EVENT_MANAGEMENT_TAG="{{EVENT_IMAGE_TAG}}" just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" INSTANCE_CONFIG="{{INSTANCE_CONFIG}}" INSTANCE_REPO="{{INSTANCE_REPO}}" deploy-kind
+    just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" INSTANCE_CONFIG="{{INSTANCE_CONFIG}}" INSTANCE_REPO="{{INSTANCE_REPO}}" deploy-kind
 
 # Reset the SiteWhere instance: delete it (the operator stays deployed), purge the
 # tenant_* databases of Postgres and InfluxDB (undeploy-instance of the deploiments
@@ -82,8 +79,7 @@ _publish-image BUILD PREFIX TAG:
     docker push "{{EVENT_IMAGE_NAME}}:{{TAG}}"
 
 # Restart the microservices one at a time, or only the given ones, e.g.
-# `just restart-microservices event-management`. event-management runs EVENT_IMAGE,
-# pulled again at each restart. Each one must have finished starting before the next
+# `just restart-microservices event-management`. Each one must have finished starting before the next
 # is restarted, to avoid saturating the API server. Readiness cannot be used: the
 # microservices have no probes and a failed one stays "Running" forever, so the logs
 # of the new pod are read instead. Stops at the first failure.
@@ -93,10 +89,6 @@ restart-microservices *SERVICES:
     kc="kubectl --context {{KUBE_CONTEXT}} -n {{INSTANCE_NAME}}"
     newest_pod() {
         $kc get pods --sort-by=.metadata.creationTimestamp -o name | grep "^pod/$1-" | tail -n 1 || true
-    }
-    uses_event_image() {
-        local container='.spec.template.spec.containers[?(@.name=="{{EVENT_SERVICE}}")]'
-        [ "$($kc get deployment {{EVENT_SERVICE}} -o jsonpath="{$container.image} {$container.imagePullPolicy}")" = "{{EVENT_IMAGE}} Always" ]
     }
     wait_started() {
         local logs
@@ -111,12 +103,7 @@ restart-microservices *SERVICES:
     for ms in {{ if SERVICES == "" { MICROSERVICES } else { SERVICES } }}; do
         echo "=== $ms"
         previous=$(newest_pod "$ms")
-        if [ "$ms" = "{{EVENT_SERVICE}}" ] && ! uses_event_image; then
-            # The operator renders the Deployment from this resource and rolls it out
-            $kc patch swm "$ms" --type merge -p '{"spec":{"podSpec":{"imagePullPolicy":"Always","dockerSpec":{"registry":"docker.io","repository":"{{INSTANCE_REPO}}","tag":"{{EVENT_IMAGE_TAG}}"}}}}'
-        else
-            $kc rollout restart "deployment/$ms"
-        fi
+        $kc rollout restart "deployment/$ms"
         pod="$previous"
         for _ in $(seq 1 30); do
             pod=$(newest_pod "$ms")
