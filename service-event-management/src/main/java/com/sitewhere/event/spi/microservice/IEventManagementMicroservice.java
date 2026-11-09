@@ -32,4 +32,29 @@ public interface IEventManagementMicroservice extends
      * @return
      */
     public IDeviceManagement getDeviceManagement();
+
+    /**
+     * Register a tenant engine as the target for events persisted to a given
+     * InfluxDB database. Used by the InfluxDB write endpoint to resolve the
+     * tenant which owns each forwarded write.
+     * 
+     * @param database
+     * @param tenantEngine
+     */
+    public void registerInfluxDatabase(String database, IEventManagementTenantEngine tenantEngine);
+
+    /**
+     * Unregister a previously registered InfluxDB database mapping.
+     * 
+     * @param database
+     */
+    public void unregisterInfluxDatabase(String database);
+
+    /**
+     * Get tenant engine registered for an InfluxDB database.
+     * 
+     * @param database
+     * @return
+     */
+    public IEventManagementTenantEngine getTenantEngineForInfluxDatabase(String database);
 }

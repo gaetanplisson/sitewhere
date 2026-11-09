@@ -94,7 +94,7 @@ route normale (forwarding direct Kafka, utilisée pour MongoDB) n'est plus activ
 | `InfluxLine` | Modèle d'une ligne du line protocol (measurement, tags, fields, timestamp en nanosecondes). |
 | `InfluxLineProtocol` | Parseur du payload line protocol v1 (échappements, sections tags/fields gérés par un `Scanner` interne). |
 | `InfluxWriteEventConverter` | Convertit une `InfluxLine` en `IDeviceEvent` et reconstruit le `IDeviceEventContext` (résolution device/assignment via le tenant engine). |
-| `InfluxWriteEndpoint` | Endpoint HTTP (`IMetricsHttpEndpoint`) servi sur le serveur de métriques (thread HTTP séparé du pipeline de persistance), chemin `/write`, paramètre `db` pour identifier la base InfluxDB. Compteurs Prometheus (`sitewhere_influxwrite_*`). |
+| `InfluxWriteEndpoint` | Endpoint HTTP (`IMetricsHttpEndpoint`) servi sur le serveur de métriques (thread HTTP séparé du pipeline de persistance), chemin `/write`, paramètre `db` pour identifier la base InfluxDB. Les lignes sont traitées en tant que system user du tenant, requis par les appels gRPC à device-management (le thread HTTP n'a pas de contexte utilisateur) ; une ligne dont le device ou l'assignment est introuvable échoue sans bloquer les autres. Compteurs Prometheus (`sitewhere_influxwrite_*`). |
 
 ### `service-event-management/.../kafka/KafkaEventPersistenceTriggers.java`
 
@@ -156,7 +156,7 @@ Côté InfluxDB, il faut créer une subscription sur la base du tenant pointant 
 l'endpoint, par exemple :
 
 ```
-CREATE SUBSCRIPTION "sitewhere_outbound" ON "<database>" DESTINATIONS ALL 'http://<host>:<metrics-port>/write?db=<database>'
+CREATE SUBSCRIPTION "sitewhere_outbound" ON "<database>"."autogen" DESTINATIONS ALL 'http://<host>:<metrics-port>/write?db=<database>'
 ```
 
 Le paramètre `db` de la requête est ce qui permet au service de retrouver le tenant

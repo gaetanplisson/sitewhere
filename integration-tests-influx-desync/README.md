@@ -56,7 +56,10 @@ Variables utiles :
 
 Autres commandes : `just delete-kind` (suppression du cluster),
 `just status` (état du déploiement), `just restart-microservices [services...]`
-(redémarrage un par un, en attendant la fin du démarrage de chacun), `just reset` (suppression de l'instance et
+(redémarrage un par un, en attendant la fin du démarrage de chacun ; event-management
+y tourne sur l'image de debug, retirée à chaque fois), `just publish-debug-image`
+(build de l'image de debug d'event-management depuis cette branche et push du tag
+`debug-async`), `just reset` (suppression de l'instance et
 des bases `tenant_*`, puis redéploiement par `deploy-kind` — l'infrastructure
 est conservée), `just undeploy` (suppression instance + interfaces +
 infrastructure).
@@ -77,8 +80,11 @@ Avec ce déploiement, la chaîne du correctif est testable de bout en bout :
 
 ```bash
 # Depuis une console du pod InfluxDB (hostname: sitewhere-system-influxdb)
-influx -execute "CREATE SUBSCRIPTION sitewhere_outbound ON \"tenant_<tenant-id>\" DESTINATIONS ALL 'http://<event-management-pod-ip>:9090/write?db=tenant_<tenant-id>'"
+influx -execute "CREATE SUBSCRIPTION sitewhere_outbound ON \"tenant_<tenant-id>\".\"autogen\" DESTINATIONS ALL 'http://event-management.<instance>:9090/write?db=tenant_<tenant-id>'"
 ```
+
+   `just check-influx-subscriptions [tenant]` vérifie qu'elle existe et qu'elle
+   vise bien event-management (son service, ou l'IP de son pod courant) ;
 
 4. le retour au `/write` reconstruit l'événement (`InfluxLineProtocol`,
    `InfluxWriteEventConverter`) puis livre le payload enrichi au topic
@@ -87,6 +93,18 @@ influx -execute "CREATE SUBSCRIPTION sitewhere_outbound ON \"tenant_<tenant-id>\
 5. les compteurs Prometheus `sitewhere_influxwrite_*` exposés sur le port
    metrics (`/metrics`) suivent lignes reçues, événements livrés et échecs.
 
+## Test de bout en bout
+
+`just test-desync-e2e [tenant]` vérifie le correctif sur le cluster, avec des
+messages au nom unique (conservés dans InfluxDB et Kafka) :
+
+1. avec la subscription, l'event est écrit une seule fois dans InfluxDB, livré par
+   `/write` (compteurs `sitewhere_influxwrite_*`) et présent une seule fois sur
+   `outbound-events` ;
+2. sans la subscription, retirée le temps de ce test puis toujours restaurée,
+   l'event est dans InfluxDB mais pas sur `outbound-events` : c'est bien la
+   subscription, et non le chemin de persistance, qui alimente le topic.
+
 ## Injection d'événements
 
 Avec event-sources et inbound-processing actifs, la chaîne complète est
@@ -94,7 +112,9 @@ testable via `just send-iot-message` — la voie MQTT des devices de
 `deploiments/iot/iot` (echo-clock) : DeviceMeasurement JSON publié sur
 `SiteWhere/<tenant>/input/json` (NodePort 30883 de la gateway Istio) sur le
 device disponible (première affectation active résolue via l'API REST), puis
-relu depuis l'API. Instance-management doit aussi tourner :
+relu depuis l'API ; `just check-iot-message-influx` envoie le même message puis
+vérifie que le point est bien arrivé dans la base InfluxDB du tenant.
+Instance-management doit aussi tourner :
 `kubectl patch swm -n <instance> event-sources --type merge -p '{"spec":{"replicas":1}}'`
 (idem `inbound-processing`, `instance-management`). L'injection directe reste
 possible :

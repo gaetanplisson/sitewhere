@@ -18,9 +18,11 @@ package com.sitewhere.event.kafka;
 import java.util.List;
 
 import com.sitewhere.event.DeviceEventManagementDecorator;
+import com.sitewhere.event.configuration.providers.TimeSeriesProvider;
 import com.sitewhere.event.processing.OutboundPayloadEnrichmentLogic;
 import com.sitewhere.event.spi.microservice.IEventManagementTenantEngine;
 import com.sitewhere.microservice.api.event.IDeviceEventManagement;
+import com.sitewhere.microservice.datastore.DatastoreDefinition;
 import com.sitewhere.spi.SiteWhereException;
 import com.sitewhere.spi.device.event.IDeviceAlert;
 import com.sitewhere.spi.device.event.IDeviceCommandInvocation;
@@ -39,12 +41,31 @@ import com.sitewhere.spi.device.event.request.IDeviceStateChangeCreateRequest;
 
 /**
  * Adds triggers to event persistence methods to push the new events into a
- * Kafka topic.
+ * Kafka topic. When InfluxDB persistence is used, events are written to
+ * InfluxDB and not forwarded here since InfluxDB subscriptions forward the
+ * writes back to the event management dedicates HTTP endpoint, which completes
+ * the outbound logic.
  */
 public class KafkaEventPersistenceTriggers extends DeviceEventManagementDecorator {
 
+    /** Indicates whether events should be forwarded to the outbound topic */
+    private boolean forwardToKafka = true;
+
     public KafkaEventPersistenceTriggers(IEventManagementTenantEngine tenantEngine, IDeviceEventManagement delegate) {
 	super(delegate);
+	setTenantEngine(tenantEngine);
+
+	// When using InfluxDB persistence, outbound processing is triggered by
+	// InfluxDB subscriptions which forward writes to the /write endpoint.
+	try {
+	    DatastoreDefinition datastore = tenantEngine.getInjector().getInstance(DatastoreDefinition.class);
+	    if (TimeSeriesProvider.INFLUX_DB.equals(datastore.getType())) {
+		this.forwardToKafka = false;
+		getLogger().info("Events will be forwarded to outbound processing via InfluxDB write forwarder.");
+	    }
+	} catch (Throwable t) {
+	    getLogger().warn("Unable to resolve datastore type, defaulting to direct event forwarding.", t);
+	}
     }
 
     /**
@@ -57,6 +78,9 @@ public class KafkaEventPersistenceTriggers extends DeviceEventManagementDecorato
      */
     protected <T extends IDeviceEvent> List<T> forwardEvents(IDeviceEventContext context, List<T> events)
 	    throws SiteWhereException {
+	if (!isForwardToKafka()) {
+	    return events;
+	}
 	getLogger().debug(String.format("Forwarding %d events to outbound topic.", events.size()));
 	for (T event : events) {
 	    OutboundPayloadEnrichmentLogic.enrichAndDeliver(getEventManagementTenantEngine(), context, event);
@@ -138,5 +162,9 @@ public class KafkaEventPersistenceTriggers extends DeviceEventManagementDecorato
 
     protected IEventManagementTenantEngine getEventManagementTenantEngine() {
 	return (IEventManagementTenantEngine) getTenantEngine();
+    }
+
+    protected boolean isForwardToKafka() {
+	return forwardToKafka;
     }
 }

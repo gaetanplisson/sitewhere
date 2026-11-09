@@ -13,6 +13,12 @@ INSTANCE_CONFIG := env("INSTANCE_CONFIG", "test")
 INSTANCE_REPO := env("INSTANCE_REPO", "gaetanplisson")
 # Microservices kept running by deploy-kind, restarted by restart-microservices
 MICROSERVICES := "instance-management device-management asset-management event-management inbound-processing event-sources"
+# Debug image of event-management built from this branch by publish-debug-image
+DEBUG_SERVICE := "event-management"
+DEBUG_IMAGE_TAG := env("DEBUG_IMAGE_TAG", "debug-async")
+DEBUG_IMAGE_NAME := "docker.io/" + INSTANCE_REPO + "/service-" + DEBUG_SERVICE
+DEBUG_IMAGE := DEBUG_IMAGE_NAME + ":" + DEBUG_IMAGE_TAG
+ROOT_DIR := justfile_directory() / ".."
 
 # Justfile of the SiteWhere deployment in the deploiments submodule
 SITWHERE_JUSTFILE := justfile_directory() / ".." / "deploiments" / "techno" / "sitewhere" / "Justfile"
@@ -54,17 +60,33 @@ reset:
     just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" undeploy-instance
     just deploy-kind
 
+# Build the debug image of event-management from the working tree of this branch
+# (JDWP on port 8000, JMX on port 1100) and push it as DEBUG_IMAGE_TAG
+publish-debug-image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --justfile "{{ROOT_DIR}}/justfile" namespace="{{INSTANCE_REPO}}" build-debug service-{{DEBUG_SERVICE}}
+    # Gradle tags the debug image debug-<version>
+    version=$(sed -nE "s/^\s*version = '(.*)'/\1/p" "{{ROOT_DIR}}/build.gradle" | head -n 1)
+    docker tag "{{DEBUG_IMAGE_NAME}}:debug-$version" "{{DEBUG_IMAGE}}"
+    docker push "{{DEBUG_IMAGE}}"
+
 # Restart the microservices one at a time, or only the given ones, e.g.
-# `just restart-microservices event-management`. Each one must have finished starting
-# before the next is restarted, to avoid saturating the API server. Readiness cannot be
-# used: the microservices have no probes and a failed one stays "Running" forever, so
-# the logs of the new pod are read instead. Stops at the first failure.
+# `just restart-microservices event-management`. event-management runs DEBUG_IMAGE,
+# pulled again at each restart. Each one must have finished starting before the next
+# is restarted, to avoid saturating the API server. Readiness cannot be used: the
+# microservices have no probes and a failed one stays "Running" forever, so the logs
+# of the new pod are read instead. Stops at the first failure.
 restart-microservices *SERVICES:
     #!/usr/bin/env bash
     set -euo pipefail
     kc="kubectl --context {{KUBE_CONTEXT}} -n {{INSTANCE_NAME}}"
     newest_pod() {
         $kc get pods --sort-by=.metadata.creationTimestamp -o name | grep "^pod/$1-" | tail -n 1 || true
+    }
+    uses_debug_image() {
+        local container='.spec.template.spec.containers[?(@.name=="{{DEBUG_SERVICE}}")]'
+        [ "$($kc get deployment {{DEBUG_SERVICE}} -o jsonpath="{$container.image} {$container.imagePullPolicy}")" = "{{DEBUG_IMAGE}} Always" ]
     }
     wait_started() {
         local logs
@@ -79,7 +101,12 @@ restart-microservices *SERVICES:
     for ms in {{ if SERVICES == "" { MICROSERVICES } else { SERVICES } }}; do
         echo "=== $ms"
         previous=$(newest_pod "$ms")
-        $kc rollout restart "deployment/$ms"
+        if [ "$ms" = "{{DEBUG_SERVICE}}" ] && ! uses_debug_image; then
+            # The operator renders the Deployment from this resource and rolls it out
+            $kc patch swm "$ms" --type merge -p '{"spec":{"podSpec":{"imagePullPolicy":"Always","dockerSpec":{"registry":"docker.io","repository":"{{INSTANCE_REPO}}","tag":"{{DEBUG_IMAGE_TAG}}"}}}}'
+        else
+            $kc rollout restart "deployment/$ms"
+        fi
         pod="$previous"
         for _ in $(seq 1 30); do
             pod=$(newest_pod "$ms")
@@ -114,6 +141,139 @@ status:
 send-iot-message DEVICE="" TENANT="default" NAME="engine.temperature" VALUE="42":
     just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" \
         send-iot-message "{{DEVICE}}" "{{TENANT}}" "{{NAME}}" "{{VALUE}}"
+
+# Send a DeviceMeasurement with send-iot-message, then check that it reached the
+# InfluxDB database of the tenant. Fails if the point is not there after 30s.
+check-iot-message-influx DEVICE="" TENANT="default" NAME="engine.temperature" VALUE="42":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    query_influx() {
+        kubectl --context {{KUBE_CONTEXT}} -n sitewhere-system exec sitewhere-influxdb-0 -c sitewhere-influxdb -- \
+            influx -database "tenant_{{TENANT}}" -format csv -execute "$1"
+    }
+    # Only match points of this message, sent after this instant
+    start=$(date +%s)
+    # The REST read-back of send-iot-message may fail while the point is stored: still check InfluxDB
+    just --justfile "{{justfile()}}" KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" \
+        send-iot-message "{{DEVICE}}" "{{TENANT}}" "{{NAME}}" "{{VALUE}}" \
+        || echo "send-iot-message failed, checking InfluxDB anyway" >&2
+    query="SELECT mxname, mxvalue, device, assignment, eid FROM events WHERE type='Measurement' AND mxname='{{NAME}}' AND mxvalue={{VALUE}} AND time >= ${start}s"
+    for _ in $(seq 1 15); do
+        rows=$(query_influx "$query" | tail -n +2)
+        if [ -n "$rows" ]; then
+            echo "Found in InfluxDB (tenant_{{TENANT}}):"
+            echo "$rows"
+            exit 0
+        fi
+        sleep 2
+    done
+    echo "Not found in InfluxDB (tenant_{{TENANT}}): $query" >&2
+    exit 1
+
+# Check that the InfluxDB database of the tenant has a subscription towards the /write
+# endpoint of event-management: its service, or its current pod IP (which changes at
+# each restart). Fails, printing the statement to run, if there is none.
+check-influx-subscriptions TENANT="default":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    database="tenant_{{TENANT}}"
+    ip=$(kubectl --context {{KUBE_CONTEXT}} -n {{INSTANCE_NAME}} get pods --sort-by=.metadata.creationTimestamp \
+        -o custom-columns=NAME:.metadata.name,IP:.status.podIP --no-headers | awk '$1 ~ /^event-management-/ {ip=$2} END {print ip}')
+    create="CREATE SUBSCRIPTION sitewhere_outbound ON \"$database\".\"autogen\" DESTINATIONS ALL 'http://event-management.{{INSTANCE_NAME}}:9090/write?db=$database'"
+    subscriptions=$(kubectl --context {{KUBE_CONTEXT}} -n sitewhere-system exec sitewhere-influxdb-0 -c sitewhere-influxdb -- \
+        influx -format csv -execute "SHOW SUBSCRIPTIONS" | grep "^$database," || true)
+    if [ -z "$subscriptions" ]; then
+        echo "No InfluxDB subscription on $database: nothing reaches outbound-events. Create it with:" >&2
+        echo "  $create" >&2
+        exit 1
+    fi
+    echo "Subscriptions on $database (database,retention policy,name,mode,destinations):"
+    echo "$subscriptions"
+    if ! grep -qE "//($ip|event-management\.{{INSTANCE_NAME}}[^:]*):9090" <<<"$subscriptions"; then
+        echo "No destination targets event-management (current pod IP: $ip). Recreate it with:" >&2
+        echo "  $create" >&2
+        exit 1
+    fi
+    echo "OK: $database forwards its writes to event-management"
+
+# End-to-end test of the InfluxDB desync, on messages with a unique name:
+#  1. with the subscription: one point in InfluxDB, delivered once on outbound-events
+#     through /write (metrics of event-management);
+#  2. without it: the point is in InfluxDB but not on outbound-events, which proves
+#     that the subscription, not the persistence path, feeds the outbound topic.
+# The subscription is removed during step 2 and always restored.
+test-desync-e2e TENANT="default":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --justfile "{{justfile()}}" KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" check-influx-subscriptions "{{TENANT}}"
+    kc_system="kubectl --context {{KUBE_CONTEXT}} -n sitewhere-system"
+    database="tenant_{{TENANT}}"
+    topic="{{INSTANCE_NAME}}.{{INSTANCE_NAME}}.tenant.{{TENANT}}.outbound-events"
+    fail() { echo "FAILED: $*" >&2; exit 1; }
+    influx_exec() { $kc_system exec sitewhere-influxdb-0 -c sitewhere-influxdb -- influx -database "$database" -format csv -execute "$1"; }
+    # Send a message, which check-iot-message-influx requires to reach InfluxDB
+    send() {
+        just --justfile "{{justfile()}}" KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" \
+            check-iot-message-influx "" "{{TENANT}}" "$1" 1 > /dev/null
+    }
+    influx_count() { influx_exec "SELECT count(mxvalue) FROM events WHERE mxname='$1'" | tail -n +2 | cut -d, -f3; }
+    metric() {
+        kubectl --context {{KUBE_CONTEXT}} -n {{INSTANCE_NAME}} exec deploy/event-management -c event-management -- \
+            curl -s localhost:9090/metrics | awk -v name="sitewhere_influxwrite_$1" '$1 == name {print int($2)}'
+    }
+    # Number of outbound messages containing a name. A failed or empty read is an
+    # error: it must not look like the absence expected in step 2.
+    outbound_count() {
+        local dump
+        dump=$(mktemp)
+        $kc_system exec sitewhere-kafka-kafka-0 -c kafka -- bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+            --topic "$topic" --from-beginning --timeout-ms 10000 > "$dump" 2> /dev/null || { rm -f "$dump"; return 1; }
+        [ -s "$dump" ] || { rm -f "$dump"; echo "Unable to read $topic" >&2; return 1; }
+        grep -acF -- "$1" "$dump" || true
+        rm -f "$dump"
+    }
+
+    id=$(date +%s)
+    name="desync.e2e.$id"
+    echo "=== 1. With the subscription: $name"
+    delivered=$(metric events_delivered)
+    failed=$(metric lines_failed)
+    send "$name"
+    sleep 3
+    count=$(influx_count "$name")
+    [ "$count" = 1 ] || fail "expected 1 point in InfluxDB for $name, found '$count'"
+    echo "OK: written once in InfluxDB"
+    new_delivered=$(metric events_delivered)
+    new_failed=$(metric lines_failed)
+    [ "$new_delivered" -gt "$delivered" ] || fail "/write delivered nothing (events_delivered: $delivered -> $new_delivered)"
+    [ "$new_failed" = "$failed" ] || fail "/write failed lines (lines_failed: $failed -> $new_failed)"
+    echo "OK: delivered by /write (events_delivered: $delivered -> $new_delivered, no failed line)"
+    count=$(outbound_count "$name")
+    [ "$count" = 1 ] || fail "expected 1 message on $topic for $name, found $count"
+    echo "OK: exactly one message on outbound-events"
+
+    name="desync.e2e.nosub.$id"
+    echo "=== 2. Without the subscription: $name"
+    IFS=, read -r _ retention subscription mode destination < <(
+        $kc_system exec sitewhere-influxdb-0 -c sitewhere-influxdb -- influx -format csv -execute "SHOW SUBSCRIPTIONS" | grep "^$database,.*,sitewhere_outbound,")
+    destination=${destination#[}
+    destination=${destination%]}
+    restore() {
+        influx_exec "CREATE SUBSCRIPTION \"$subscription\" ON \"$database\".\"$retention\" DESTINATIONS $mode '$destination'"
+        echo "Subscription $subscription restored: $destination"
+    }
+    influx_exec "DROP SUBSCRIPTION \"$subscription\" ON \"$database\".\"$retention\""
+    trap restore EXIT
+    sleep 5
+    send "$name"
+    sleep 3
+    count=$(influx_count "$name")
+    [ "$count" = 1 ] || fail "expected 1 point in InfluxDB for $name, found '$count'"
+    echo "OK: written in InfluxDB"
+    count=$(outbound_count "$name")
+    [ "$count" = 0 ] || fail "$name reached $topic without subscription ($count messages): the direct push is still active"
+    echo "OK: not on outbound-events, the persistence path does not feed it"
+    echo "=== PASSED"
 
 # Undeploy SiteWhere (instance, interfaces and infrastructure)
 undeploy:
