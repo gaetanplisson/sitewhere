@@ -15,6 +15,7 @@
  */
 package com.sitewhere.event.microservice;
 
+import java.util.concurrent.ConcurrentHashMap;
 import javax.enterprise.context.ApplicationScoped;
 
 import com.sitewhere.event.configuration.EventManagementConfiguration;
@@ -38,9 +39,6 @@ import com.sitewhere.spi.microservice.lifecycle.ILifecycleProgressMonitor;
 
 import io.sitewhere.k8s.crd.tenant.engine.SiteWhereTenantEngine;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
 /**
  * Microservice that provides device event management functionality.
  */
@@ -55,11 +53,8 @@ public class EventManagementMicroservice extends
     /** Device management API channel */
     private IDeviceManagement deviceManagement;
 
-    /** Endpoint which completes outbound logic from InfluxDB writes */
-    private InfluxWriteEndpoint influxWriteEndpoint;
-
     /** Map of InfluxDB database names to tenant engines */
-    private Map<String, IEventManagementTenantEngine> tenantEnginesByInfluxDatabase = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<String, IEventManagementTenantEngine> tenantEnginesByInfluxDatabase = new ConcurrentHashMap<>();
 
     /*
      * (non-Javadoc)
@@ -117,9 +112,7 @@ public class EventManagementMicroservice extends
 	// Create GRPC components.
 	createGrpcComponents();
 
-	// Register endpoint which completes outbound logic from InfluxDB writes.
-	this.influxWriteEndpoint = new InfluxWriteEndpoint(this);
-	getMetricsServer().registerEndpoint(getInfluxWriteEndpoint());
+	getMetricsServer().registerEndpoint(new InfluxWriteEndpoint(this));
 
 	// Create step that will start components.
 	ICompositeLifecycleStep init = new CompositeLifecycleStep("Initialize " + getName());
@@ -203,15 +196,6 @@ public class EventManagementMicroservice extends
 	return eventManagementGrpcServer;
     }
 
-    public InfluxWriteEndpoint getInfluxWriteEndpoint() {
-	return influxWriteEndpoint;
-    }
-
-    /*
-     * @see com.sitewhere.event.spi.microservice.IEventManagementMicroservice#
-     * registerInfluxDatabase(java.lang.String,
-     * com.sitewhere.event.spi.microservice.IEventManagementTenantEngine)
-     */
     @Override
     public void registerInfluxDatabase(String database, IEventManagementTenantEngine tenantEngine) {
 	tenantEnginesByInfluxDatabase.put(database, tenantEngine);
@@ -219,20 +203,12 @@ public class EventManagementMicroservice extends
 		tenantEngine.getTenantResource().getMetadata().getName(), database));
     }
 
-    /*
-     * @see com.sitewhere.event.spi.microservice.IEventManagementMicroservice#
-     * unregisterInfluxDatabase(java.lang.String)
-     */
     @Override
     public void unregisterInfluxDatabase(String database) {
 	tenantEnginesByInfluxDatabase.remove(database);
 	getLogger().info(String.format("Unregistered tenant engine for InfluxDB database '%s'.", database));
     }
 
-    /*
-     * @see com.sitewhere.event.spi.microservice.IEventManagementMicroservice#
-     * getTenantEngineForInfluxDatabase(java.lang.String)
-     */
     @Override
     public IEventManagementTenantEngine getTenantEngineForInfluxDatabase(String database) {
 	return tenantEnginesByInfluxDatabase.get(database);

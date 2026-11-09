@@ -41,23 +41,17 @@ import com.sitewhere.spi.device.event.request.IDeviceStateChangeCreateRequest;
 
 /**
  * Adds triggers to event persistence methods to push the new events into a
- * Kafka topic. When InfluxDB persistence is used, events are written to
- * InfluxDB and not forwarded here since InfluxDB subscriptions forward the
- * writes back to the event management dedicates HTTP endpoint, which completes
- * the outbound logic.
+ * Kafka topic.
  */
 public class KafkaEventPersistenceTriggers extends DeviceEventManagementDecorator {
 
-    /** Indicates whether events should be forwarded to the outbound topic */
     private boolean forwardToKafka = true;
 
     public KafkaEventPersistenceTriggers(IEventManagementTenantEngine tenantEngine, IDeviceEventManagement delegate) {
 	super(delegate);
 	setTenantEngine(tenantEngine);
-
-	// When using InfluxDB persistence, outbound processing is triggered by
-	// InfluxDB subscriptions which forward writes to the /write endpoint.
 	try {
+	    // With InfluxDB, its subscriptions trigger the outbound logic through /write
 	    DatastoreDefinition datastore = tenantEngine.getInjector().getInstance(DatastoreDefinition.class);
 	    if (TimeSeriesProvider.INFLUX_DB.equals(datastore.getType())) {
 		this.forwardToKafka = false;
@@ -78,7 +72,7 @@ public class KafkaEventPersistenceTriggers extends DeviceEventManagementDecorato
      */
     protected <T extends IDeviceEvent> List<T> forwardEvents(IDeviceEventContext context, List<T> events)
 	    throws SiteWhereException {
-	if (!isForwardToKafka()) {
+	if (!forwardToKafka) {
 	    return events;
 	}
 	getLogger().debug(String.format("Forwarding %d events to outbound topic.", events.size()));
@@ -162,9 +156,5 @@ public class KafkaEventPersistenceTriggers extends DeviceEventManagementDecorato
 
     protected IEventManagementTenantEngine getEventManagementTenantEngine() {
 	return (IEventManagementTenantEngine) getTenantEngine();
-    }
-
-    protected boolean isForwardToKafka() {
-	return forwardToKafka;
     }
 }

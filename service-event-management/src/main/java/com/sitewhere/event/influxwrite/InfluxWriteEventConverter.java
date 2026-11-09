@@ -36,20 +36,9 @@ import com.sitewhere.spi.device.event.DeviceEventType;
 import com.sitewhere.spi.device.event.IDeviceEvent;
 import com.sitewhere.spi.device.event.IDeviceEventContext;
 
-/**
- * Converts line protocol entries forwarded by an InfluxDB v1 subscription into
- * device events, and rebuilds the event context from InfluxDB tags enriched
- * with device management data.
- */
+/** Converts forwarded line protocol entries into device events and their context. */
 public class InfluxWriteEventConverter {
 
-    /**
-     * Parse a line protocol entry into a device event.
-     * 
-     * @param line
-     * @return
-     * @throws SiteWhereException
-     */
     public static IDeviceEvent parseEvent(InfluxLine line) throws SiteWhereException {
 	if (!InfluxDbDeviceEvent.COLLECTION_EVENTS.equals(line.getMeasurement())) {
 	    throw new SiteWhereException("Unexpected measurement '" + line.getMeasurement() + "'.");
@@ -78,64 +67,34 @@ public class InfluxWriteEventConverter {
     }
 
     /**
-     * Build event context from event data, enriched by device management
-     * lookups, which need a user context on the current thread. The event cannot
-     * be forwarded without the device data, so a failed lookup is an error.
-     *
-     * @param tenantEngine
-     * @param event
-     * @return
-     * @throws SiteWhereException
+     * Build the event context from device management, which needs a user context on
+     * the current thread. An event cannot be forwarded without this data.
      */
     public static IDeviceEventContext buildContext(IEventManagementTenantEngine tenantEngine, IDeviceEvent event)
 	    throws SiteWhereException {
-	DeviceEventContext context = new DeviceEventContext();
-	context.setDeviceId(event.getDeviceId());
-	context.setDeviceAssignmentId(event.getDeviceAssignmentId());
-	context.setCustomerId(event.getCustomerId());
-	context.setAreaId(event.getAreaId());
-	context.setAssetId(event.getAssetId());
-	enrichFromDeviceManagement(tenantEngine, context, event);
-	return context;
-    }
-
-    /**
-     * Use device management lookups to fill context fields not stored with the
-     * event in InfluxDB.
-     * 
-     * @param tenantEngine
-     * @param context
-     * @param event
-     * @throws SiteWhereException
-     */
-    protected static void enrichFromDeviceManagement(IEventManagementTenantEngine tenantEngine,
-	    DeviceEventContext context, IDeviceEvent event) throws SiteWhereException {
 	IDeviceManagement devices = ((IEventManagementMicroservice) tenantEngine.getMicroservice())
 		.getDeviceManagement();
 	IDevice device = devices.getDevice(event.getDeviceId());
 	if (device == null) {
 	    throw new SiteWhereException("Device not found: " + event.getDeviceId());
 	}
+	IDeviceAssignment assignment = devices.getDeviceAssignment(event.getDeviceAssignmentId());
+	if (assignment == null) {
+	    throw new SiteWhereException("Device assignment not found: " + event.getDeviceAssignmentId());
+	}
+	DeviceEventContext context = new DeviceEventContext();
+	context.setDeviceId(event.getDeviceId());
+	context.setDeviceAssignmentId(event.getDeviceAssignmentId());
+	context.setCustomerId(event.getCustomerId() != null ? event.getCustomerId() : assignment.getCustomerId());
+	context.setAreaId(event.getAreaId() != null ? event.getAreaId() : assignment.getAreaId());
+	context.setAssetId(event.getAssetId() != null ? event.getAssetId() : assignment.getAssetId());
 	context.setDeviceToken(device.getToken());
 	context.setDeviceTypeId(device.getDeviceTypeId());
 	context.setParentDeviceId(device.getParentDeviceId());
 	context.setDeviceStatus(device.getStatus());
 	context.setDeviceMetadata(device.getMetadata() != null ? device.getMetadata() : new HashMap<>());
-
-	IDeviceAssignment assignment = devices.getDeviceAssignment(event.getDeviceAssignmentId());
-	if (assignment == null) {
-	    throw new SiteWhereException("Device assignment not found: " + event.getDeviceAssignmentId());
-	}
 	context.setDeviceAssignmentStatus(assignment.getStatus());
 	context.setDeviceAssignmentMetadata(assignment.getMetadata() != null ? assignment.getMetadata() : new HashMap<>());
-	if (context.getCustomerId() == null) {
-	    context.setCustomerId(assignment.getCustomerId());
-	}
-	if (context.getAreaId() == null) {
-	    context.setAreaId(assignment.getAreaId());
-	}
-	if (context.getAssetId() == null) {
-	    context.setAssetId(assignment.getAssetId());
-	}
+	return context;
     }
 }

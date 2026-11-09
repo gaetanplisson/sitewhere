@@ -13,11 +13,15 @@ INSTANCE_CONFIG := env("INSTANCE_CONFIG", "test")
 INSTANCE_REPO := env("INSTANCE_REPO", "gaetanplisson")
 # Microservices kept running by deploy-kind, restarted by restart-microservices
 MICROSERVICES := "instance-management device-management asset-management event-management inbound-processing event-sources"
-# Debug image of event-management built from this branch by publish-debug-image
-DEBUG_SERVICE := "event-management"
+# Images of event-management built from this branch by publish-image and
+# publish-debug-image. The test environment runs EVENT_IMAGE_TAG: use the debug image
+# with EVENT_IMAGE_TAG=debug-async
+EVENT_SERVICE := "event-management"
+RELEASE_IMAGE_TAG := env("RELEASE_IMAGE_TAG", "async")
 DEBUG_IMAGE_TAG := env("DEBUG_IMAGE_TAG", "debug-async")
-DEBUG_IMAGE_NAME := "docker.io/" + INSTANCE_REPO + "/service-" + DEBUG_SERVICE
-DEBUG_IMAGE := DEBUG_IMAGE_NAME + ":" + DEBUG_IMAGE_TAG
+EVENT_IMAGE_TAG := env("EVENT_IMAGE_TAG", RELEASE_IMAGE_TAG)
+EVENT_IMAGE_NAME := "docker.io/" + INSTANCE_REPO + "/service-" + EVENT_SERVICE
+EVENT_IMAGE := EVENT_IMAGE_NAME + ":" + EVENT_IMAGE_TAG
 ROOT_DIR := justfile_directory() / ".."
 
 # Justfile of the SiteWhere deployment in the deploiments submodule
@@ -48,9 +52,10 @@ delete-kind:
 
 # Deploy SiteWhere on the Kind cluster: passthrough echarde WasmPlugins, no
 # Colvert, only device-management and event-management kept running (see the
-# deploy-kind recipe of the deploiments Justfile)
+# deploy-kind recipe of the deploiments Justfile), with event-management on
+# EVENT_IMAGE, which publish-image must have pushed
 deploy-kind:
-    just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" INSTANCE_CONFIG="{{INSTANCE_CONFIG}}" INSTANCE_REPO="{{INSTANCE_REPO}}" deploy-kind
+    EVENT_MANAGEMENT_TAG="{{EVENT_IMAGE_TAG}}" just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" INSTANCE_CONFIG="{{INSTANCE_CONFIG}}" INSTANCE_REPO="{{INSTANCE_REPO}}" deploy-kind
 
 # Reset the SiteWhere instance: delete it (the operator stays deployed), purge the
 # tenant_* databases of Postgres and InfluxDB (undeploy-instance of the deploiments
@@ -60,19 +65,24 @@ reset:
     just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" undeploy-instance
     just deploy-kind
 
-# Build the debug image of event-management from the working tree of this branch
-# (JDWP on port 8000, JMX on port 1100) and push it as DEBUG_IMAGE_TAG
-publish-debug-image:
+# Build the image of event-management from the working tree of this branch and push
+# it as RELEASE_IMAGE_TAG, the image of the test environment
+publish-image: (_publish-image "build" "" RELEASE_IMAGE_TAG)
+
+# Same in debug mode (JDWP on port 8000, JMX on port 1100), pushed as DEBUG_IMAGE_TAG
+publish-debug-image: (_publish-image "build-debug" "debug-" DEBUG_IMAGE_TAG)
+
+# Build with a recipe of the root justfile, whose image is tagged <PREFIX><version>
+_publish-image BUILD PREFIX TAG:
     #!/usr/bin/env bash
     set -euo pipefail
-    just --justfile "{{ROOT_DIR}}/justfile" namespace="{{INSTANCE_REPO}}" build-debug service-{{DEBUG_SERVICE}}
-    # Gradle tags the debug image debug-<version>
+    just --justfile "{{ROOT_DIR}}/justfile" namespace="{{INSTANCE_REPO}}" {{BUILD}} service-{{EVENT_SERVICE}}
     version=$(sed -nE "s/^\s*version = '(.*)'/\1/p" "{{ROOT_DIR}}/build.gradle" | head -n 1)
-    docker tag "{{DEBUG_IMAGE_NAME}}:debug-$version" "{{DEBUG_IMAGE}}"
-    docker push "{{DEBUG_IMAGE}}"
+    docker tag "{{EVENT_IMAGE_NAME}}:{{PREFIX}}$version" "{{EVENT_IMAGE_NAME}}:{{TAG}}"
+    docker push "{{EVENT_IMAGE_NAME}}:{{TAG}}"
 
 # Restart the microservices one at a time, or only the given ones, e.g.
-# `just restart-microservices event-management`. event-management runs DEBUG_IMAGE,
+# `just restart-microservices event-management`. event-management runs EVENT_IMAGE,
 # pulled again at each restart. Each one must have finished starting before the next
 # is restarted, to avoid saturating the API server. Readiness cannot be used: the
 # microservices have no probes and a failed one stays "Running" forever, so the logs
@@ -84,9 +94,9 @@ restart-microservices *SERVICES:
     newest_pod() {
         $kc get pods --sort-by=.metadata.creationTimestamp -o name | grep "^pod/$1-" | tail -n 1 || true
     }
-    uses_debug_image() {
-        local container='.spec.template.spec.containers[?(@.name=="{{DEBUG_SERVICE}}")]'
-        [ "$($kc get deployment {{DEBUG_SERVICE}} -o jsonpath="{$container.image} {$container.imagePullPolicy}")" = "{{DEBUG_IMAGE}} Always" ]
+    uses_event_image() {
+        local container='.spec.template.spec.containers[?(@.name=="{{EVENT_SERVICE}}")]'
+        [ "$($kc get deployment {{EVENT_SERVICE}} -o jsonpath="{$container.image} {$container.imagePullPolicy}")" = "{{EVENT_IMAGE}} Always" ]
     }
     wait_started() {
         local logs
@@ -101,9 +111,9 @@ restart-microservices *SERVICES:
     for ms in {{ if SERVICES == "" { MICROSERVICES } else { SERVICES } }}; do
         echo "=== $ms"
         previous=$(newest_pod "$ms")
-        if [ "$ms" = "{{DEBUG_SERVICE}}" ] && ! uses_debug_image; then
+        if [ "$ms" = "{{EVENT_SERVICE}}" ] && ! uses_event_image; then
             # The operator renders the Deployment from this resource and rolls it out
-            $kc patch swm "$ms" --type merge -p '{"spec":{"podSpec":{"imagePullPolicy":"Always","dockerSpec":{"registry":"docker.io","repository":"{{INSTANCE_REPO}}","tag":"{{DEBUG_IMAGE_TAG}}"}}}}'
+            $kc patch swm "$ms" --type merge -p '{"spec":{"podSpec":{"imagePullPolicy":"Always","dockerSpec":{"registry":"docker.io","repository":"{{INSTANCE_REPO}}","tag":"{{EVENT_IMAGE_TAG}}"}}}}'
         else
             $kc rollout restart "deployment/$ms"
         fi

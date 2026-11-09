@@ -109,14 +109,12 @@ route normale (forwarding direct Kafka, utilisée pour MongoDB) n'est plus activ
 
 ### `service-event-management/.../microservice/EventManagementTenantEngine.java`
 
-- Nouvelle méthode `registerInfluxDatabaseIfApplicable()` : si le datastore du
-  tenant est InfluxDB, le nom de base est récupéré depuis le `InfluxDbClient`
-  injecté et le tenant engine s'enregistre auprès du microservice comme
-  propriétaire de cette base. Appelée dans `tenantInitialize()`.
+- Dans `tenantInitialize()` : si le datastore du tenant est InfluxDB, le nom de
+  base est récupéré depuis le `InfluxDbClient` injecté, conservé dans le champ
+  `influxDatabase`, et le tenant engine s'enregistre auprès du microservice
+  comme propriétaire de cette base.
 - `tenantStop()` appelle `unregisterInfluxDatabase()` pour arrêter le forwarding
   des écritures de la base du tenant.
-- Nouveaux champ/accesseurs `influxDatabase` et helper
-  `getEventManagementMicroservice()`.
 
 ### `service-event-management/.../microservice/EventManagementMicroservice.java`
 
@@ -139,6 +137,75 @@ public void registerInfluxDatabase(String database, IEventManagementTenantEngine
 public void unregisterInfluxDatabase(String database);
 public IEventManagementTenantEngine getTenantEngineForInfluxDatabase(String database);
 ```
+
+## Implémentation
+
+### Démarrage
+
+1. `EventManagementMicroservice` crée un `InfluxWriteEndpoint` et l'enregistre sur
+   le serveur de métriques du microservice. Aucun serveur n'est ajouté : `/write`
+   partage le port metrics (9090) et le pool de 16 threads HTTP de ce serveur, ce
+   qui le sépare du thread du pipeline de persistance.
+2. À l'initialisation d'un tenant dont le datastore est `influxdb`,
+   `EventManagementTenantEngine` s'inscrit dans la table
+   `base InfluxDB -> tenant engine` du microservice, retirée à l'arrêt du tenant.
+3. Pour ce même tenant, `KafkaEventPersistenceTriggers` passe `forwardToKafka` à
+   `false` : `forwardEvents()` rend les events sans les envoyer. Le chemin de
+   persistance vers InfluxDB ne change pas.
+
+### Traitement d'une écriture
+
+`InfluxWriteEndpoint.handle()` :
+
+1. vérifie la méthode et résout le tenant engine à partir du paramètre `db` ;
+2. découpe le corps en `InfluxLine` avec `InfluxLineProtocol`, en conservant le
+   type des champs (chaîne, flottant, entier, booléen) ;
+3. traite les lignes dans un `SystemUserCallable` : le thread HTTP n'a pas de
+   `UserContext`, indispensable aux appels gRPC vers device-management. Puis, pour
+   chaque ligne :
+   - `InfluxWriteEventConverter.parseEvent()` passe par `InfluxLine.toValueMap()`,
+     qui reproduit le format des résultats de requête InfluxDB, ce qui permet de
+     réutiliser les parseurs `InfluxDbDevice*.parse()` ;
+   - `buildContext()` relit le device et l'assignment, absents d'InfluxDB pour
+     une partie de leurs champs (token, type, statut, métadonnées) ;
+   - `OutboundPayloadEnrichmentLogic.enrichAndDeliver()`, la logique du chemin
+     historique, publie sur `outbound-events` (et `outbound-command-invocations`
+     pour une commande).
+
+**Exécution en system user.** Tout le traitement d'un lot, publication sur Kafka
+outbound comprise, est délégué au system user du tenant. Le chemin de persistance
+fonctionnait déjà ainsi (`EventPersistenceMapper`), mais le thread HTTP n'a aucun
+contexte utilisateur : sans lui, les lectures gRPC du device et de l'assignment
+échouent et l'event ne peut pas être publié. Ce choix ne change pas le contenu des
+events publiés et n'a pas d'impact fonctionnel ; sa seule conséquence concerne la
+sécurité. `/write` n'authentifie pas l'appelant et traite pourtant ses lignes avec
+les droits du system user, y compris les commandes publiées sur
+`outbound-command-invocations`. Tant que l'endpoint n'est pas authentifié, seul
+InfluxDB doit pouvoir l'atteindre.
+
+### Réponses et erreurs
+
+| Situation | Réponse |
+|---|---|
+| Méthode autre que `POST` | 405 |
+| Paramètre `db` absent | 400 |
+| Base non enregistrée | 404 |
+| Payload illisible (une ligne invalide rejette tout le lot) | 400 |
+| Toutes les lignes échouent | 500 |
+| Au moins une ligne traitée, ou lot vide | 204 |
+| Exception inattendue | 500 |
+
+Une ligne échoue seule si sa conversion, la lecture de son device ou de son
+assignment, ou sa publication échoue : les autres lignes du lot continuent, et le
+compteur `sitewhere_influxwrite_lines_failed` augmente. Le service ne rejoue pas
+une ligne en échec.
+
+### Limites
+
+- `originator` et `sourceId` ne sont pas stockés dans InfluxDB : ils sont absents
+  du contexte des events publiés.
+- Le serveur de métriques et `IMetricsHttpEndpoint` viennent de
+  `sitewhere-microservice` en version `3.0.11g`.
 
 ## Tests (`src/test`)
 

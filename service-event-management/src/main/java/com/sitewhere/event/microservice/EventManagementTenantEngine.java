@@ -71,30 +71,10 @@ public class EventManagementTenantEngine extends MicroserviceTenantEngine<EventM
     /** Kakfa producer for pushed persistend command invocations to a topic */
     private IOutboundCommandInvocationsProducer outboundCommandInvocationsProducer;
 
-    /** InfluxDB database associated with the tenant (only for influxdb datastore) */
     private String influxDatabase;
 
     public EventManagementTenantEngine(SiteWhereTenantEngine engine) {
 	super(engine);
-    }
-
-    /**
-     * If the tenant uses InfluxDB for event persistence, resolve the database
-     * name and register this engine as its owner so that writes forwarded by
-     * InfluxDB subscriptions can be routed back to this tenant.
-     */
-    protected void registerInfluxDatabaseIfApplicable() {
-	try {
-	    DatastoreDefinition datastore = getInjector().getInstance(DatastoreDefinition.class);
-	    if (TimeSeriesProvider.INFLUX_DB.equals(datastore.getType())) {
-		InfluxDbClient client = getInjector().getInstance(InfluxDbClient.class);
-		String database = client.getConfiguration().getDatabase();
-		setInfluxDatabase(database);
-		getEventManagementMicroservice().registerInfluxDatabase(database, this);
-	    }
-	} catch (Throwable t) {
-	    getLogger().warn("Unable to register tenant engine for InfluxDB write forwarding.", t);
-	}
     }
 
     /*
@@ -161,9 +141,16 @@ public class EventManagementTenantEngine extends MicroserviceTenantEngine<EventM
      */
     @Override
     public void tenantInitialize(ILifecycleProgressMonitor monitor) throws SiteWhereException {
-	// Register tenant engine as owner of its InfluxDB database so that
-	// forwarded writes can be resolved to the tenant which persisted them.
-	registerInfluxDatabaseIfApplicable();
+	try {
+	    // Owner of the InfluxDB database, for the writes its subscription forwards
+	    DatastoreDefinition datastore = getInjector().getInstance(DatastoreDefinition.class);
+	    if (TimeSeriesProvider.INFLUX_DB.equals(datastore.getType())) {
+		influxDatabase = getInjector().getInstance(InfluxDbClient.class).getConfiguration().getDatabase();
+		((IEventManagementMicroservice) getMicroservice()).registerInfluxDatabase(influxDatabase, this);
+	    }
+	} catch (Throwable t) {
+	    getLogger().warn("Unable to register tenant engine for InfluxDB write forwarding.", t);
+	}
 
 	// Create step that will initialize components.
 	ICompositeLifecycleStep init = new CompositeLifecycleStep("Initialize " + getComponentName());
@@ -217,9 +204,8 @@ public class EventManagementTenantEngine extends MicroserviceTenantEngine<EventM
      */
     @Override
     public void tenantStop(ILifecycleProgressMonitor monitor) throws SiteWhereException {
-	// Stop forwarding writes for this tenant's database.
-	if (getInfluxDatabase() != null) {
-	    getEventManagementMicroservice().unregisterInfluxDatabase(getInfluxDatabase());
+	if (influxDatabase != null) {
+	    ((IEventManagementMicroservice) getMicroservice()).unregisterInfluxDatabase(influxDatabase);
 	}
 
 	// Create step that will stop components.
@@ -292,17 +278,5 @@ public class EventManagementTenantEngine extends MicroserviceTenantEngine<EventM
 
     protected IDeviceManagement getDeviceManagement() {
 	return ((IEventManagementMicroservice) getMicroservice()).getDeviceManagement();
-    }
-
-    protected IEventManagementMicroservice getEventManagementMicroservice() {
-	return (IEventManagementMicroservice) getMicroservice();
-    }
-
-    protected String getInfluxDatabase() {
-	return influxDatabase;
-    }
-
-    protected void setInfluxDatabase(String influxDatabase) {
-	this.influxDatabase = influxDatabase;
     }
 }

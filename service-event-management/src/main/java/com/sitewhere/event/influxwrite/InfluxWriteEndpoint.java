@@ -39,211 +39,134 @@ import com.sun.net.httpserver.HttpHandler;
 
 import io.prometheus.client.Counter;
 
-/**
- * HTTP endpoint which receives InfluxDB v1 line protocol writes forwarded by
- * InfluxDB subscriptions and completes the outbound processing logic for each
- * event they contain.
- */
+/** Completes the outbound processing of the writes forwarded by InfluxDB subscriptions. */
 public class InfluxWriteEndpoint implements IMetricsHttpEndpoint {
 
-    /** Path served for InfluxDB write operations */
     public static final String WRITE_PATH = "/write";
 
-    /** Query parameter which indicates the InfluxDB database */
-    public static final String PARAM_DATABASE = "db";
-
-    /** Static logger instance */
     private static final Log LOGGER = LogFactory.getLog(InfluxWriteEndpoint.class);
 
-    /** Counter for lines received */
     private static final Counter WRITE_LINES_RECEIVED = Counter.build().name("sitewhere_influxwrite_lines_received")
 	    .help("Count of line protocol lines received on the /write endpoint.").register();
 
-    /** Counter for events converted and delivered */
     private static final Counter WRITE_EVENTS_DELIVERED = Counter.build()
 	    .name("sitewhere_influxwrite_events_delivered")
 	    .help("Count of events reconstructed from line protocol and delivered to outbound processing.").register();
 
-    /** Counter for lines which could not be processed */
     private static final Counter WRITE_LINES_FAILED = Counter.build().name("sitewhere_influxwrite_lines_failed")
 	    .help("Count of line protocol lines which could not be processed.").register();
 
-    /** Parent microservice */
-    private IEventManagementMicroservice microservice;
+    private final IEventManagementMicroservice microservice;
 
     public InfluxWriteEndpoint(IEventManagementMicroservice microservice) {
 	this.microservice = microservice;
     }
 
-    /*
-     * @see com.sitewhere.spi.microservice.metrics.IMetricsHttpEndpoint#getPath()
-     */
     @Override
     public String getPath() {
 	return WRITE_PATH;
     }
 
-    /*
-     * @see
-     * com.sitewhere.spi.microservice.metrics.IMetricsHttpEndpoint#createHandler()
-     */
     @Override
     public HttpHandler createHandler() {
-	return new WriteHandler();
+	return this::handle;
+    }
+
+    private void handle(HttpExchange exchange) throws IOException {
+	try {
+	    if (!"POST".equals(exchange.getRequestMethod())) {
+		LOGGER.warn("Received non-POST request on /write endpoint (ignored).");
+		respond(exchange, 405, "Method not allowed");
+		return;
+	    }
+	    String database = getDatabase(exchange);
+	    if (database == null) {
+		respond(exchange, 400, "Missing 'db' query parameter");
+		return;
+	    }
+	    IEventManagementTenantEngine tenantEngine = microservice.getTenantEngineForInfluxDatabase(database);
+	    if (tenantEngine == null) {
+		LOGGER.warn(String.format("Write received for unknown InfluxDB database '%s'.", database));
+		respond(exchange, 404, "Unknown database");
+		return;
+	    }
+	    List<InfluxLine> lines = InfluxLineProtocol.parsePayload(readBody(exchange.getRequestBody()));
+	    WRITE_LINES_RECEIVED.inc(lines.size());
+	    int failures = processLines(tenantEngine, lines);
+	    if (failures > 0 && failures == lines.size()) {
+		respond(exchange, 500, "Unable to process line protocol payload");
+	    } else {
+		respond(exchange, 204, "");
+	    }
+	} catch (SiteWhereException e) {
+	    LOGGER.error("Unable to process write request.", e);
+	    respond(exchange, 400, "Bad request");
+	} catch (Throwable t) {
+	    LOGGER.error("Unhandled exception processing write request.", t);
+	    respond(exchange, 500, "Server error");
+	} finally {
+	    exchange.close();
+	}
     }
 
     /**
-     * Handles forwarded InfluxDB writes.
+     * Process lines as the system user of the tenant: the HTTP thread has no user
+     * context, which device management GRPC calls require.
+     *
+     * @return number of lines which could not be processed
      */
-    protected class WriteHandler implements HttpHandler {
-
-	@Override
-	public void handle(HttpExchange exchange) throws IOException {
-	    try {
-		String method = exchange.getRequestMethod();
-		if (!"POST".equals(method)) {
-		    LOGGER.warn("Received non-POST request on /write endpoint (ignored).");
-		    respond(exchange, 405, "Method not allowed".getBytes(StandardCharsets.UTF_8));
-		    return;
-		}
-
-		// Resolve tenant engine based on the queried database.
-		String database = getDatabase(exchange);
-		if (database == null) {
-		    respond(exchange, 400, "Missing 'db' query parameter".getBytes(StandardCharsets.UTF_8));
-		    return;
-		}
-		IEventManagementTenantEngine tenantEngine = getMicroservice()
-			.getTenantEngineForInfluxDatabase(database);
-		if (tenantEngine == null) {
-		    LOGGER.warn(String.format("Write received for unknown InfluxDB database '%s'.", database));
-		    respond(exchange, 404, "Unknown database".getBytes(StandardCharsets.UTF_8));
-		    return;
-		}
-
-		// Parse payload and finish outbound logic for each event.
-		String payload = readBody(exchange.getRequestBody());
-		List<InfluxLine> lines = InfluxLineProtocol.parsePayload(payload);
-		WRITE_LINES_RECEIVED.inc(lines.size());
-		int failures = new LineProcessor(tenantEngine, lines).call();
-
-		// Signal failure so that InfluxDB is aware processing did not fully succeed.
-		if (failures > 0 && failures == lines.size()) {
-		    respond(exchange, 500, "Unable to process line protocol payload".getBytes(StandardCharsets.UTF_8));
-		} else {
-		    respond(exchange, 204, new byte[0]);
-		}
-	    } catch (SiteWhereException e) {
-		LOGGER.error("Unable to process write request.", e);
-		respond(exchange, 400, "Bad request".getBytes(StandardCharsets.UTF_8));
-	    } catch (Throwable t) {
-		LOGGER.error("Unhandled exception processing write request.", t);
-		respond(exchange, 500, "Server error".getBytes(StandardCharsets.UTF_8));
-	    } finally {
-		exchange.close();
-	    }
-	}
-
-	/**
-	 * Read the 'db' query parameter.
-	 * 
-	 * @param exchange
-	 * @return
-	 */
-	protected String getDatabase(HttpExchange exchange) {
-	    String query = exchange.getRequestURI().getQuery();
-	    if (query == null) {
-		return null;
-	    }
-	    for (String param : query.split("&")) {
-		int eq = param.indexOf('=');
-		if (eq > 0) {
-		    String key = param.substring(0, eq);
-		    if (PARAM_DATABASE.equals(key)) {
-			return param.substring(eq + 1);
+    private static int processLines(IEventManagementTenantEngine tenantEngine, List<InfluxLine> lines)
+	    throws Exception {
+	return new SystemUserCallable<Integer>(tenantEngine) {
+	    @Override
+	    public Integer runAsSystemUser() {
+		int failures = 0;
+		for (InfluxLine line : lines) {
+		    try {
+			IDeviceEvent event = InfluxWriteEventConverter.parseEvent(line);
+			IDeviceEventContext context = InfluxWriteEventConverter.buildContext(tenantEngine, event);
+			OutboundPayloadEnrichmentLogic.enrichAndDeliver(tenantEngine, context, event);
+			WRITE_EVENTS_DELIVERED.inc();
+		    } catch (Exception e) {
+			failures++;
+			WRITE_LINES_FAILED.inc();
+			LOGGER.error(String.format("Unable to process line protocol entry: %s", line), e);
 		    }
 		}
+		return failures;
 	    }
-	    return null;
-	}
-
-	/**
-	 * Read full request body as UTF-8 text.
-	 * 
-	 * @param input
-	 * @return
-	 * @throws IOException
-	 */
-	protected String readBody(InputStream input) throws IOException {
-	    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-	    byte[] chunk = new byte[4096];
-	    int read;
-	    while ((read = input.read(chunk)) != -1) {
-		buffer.write(chunk, 0, read);
-	    }
-	    return new String(buffer.toByteArray(), StandardCharsets.UTF_8);
-	}
-
-	/**
-	 * Send an HTTP response.
-	 * 
-	 * @param exchange
-	 * @param status
-	 * @param body
-	 * @throws IOException
-	 */
-	protected void respond(HttpExchange exchange, int status, byte[] body) throws IOException {
-	    if (body.length > 0) {
-		exchange.sendResponseHeaders(status, body.length);
-		try (OutputStream out = exchange.getResponseBody()) {
-		    out.write(body);
-		}
-	    } else {
-		exchange.sendResponseHeaders(status, -1);
-	    }
-	}
+	}.call();
     }
 
-    /**
-     * Completes outbound logic for forwarded lines as the system user of the
-     * tenant: the HTTP thread has no user context, which is required by the
-     * device management GRPC calls. A line which fails does not affect the others.
-     */
-    private static class LineProcessor extends SystemUserCallable<Integer> {
-
-	private final IEventManagementTenantEngine tenantEngine;
-
-	private final List<InfluxLine> lines;
-
-	public LineProcessor(IEventManagementTenantEngine tenantEngine, List<InfluxLine> lines) {
-	    super(tenantEngine);
-	    this.tenantEngine = tenantEngine;
-	    this.lines = lines;
-	}
-
-	/**
-	 * @return number of lines which could not be processed
-	 */
-	@Override
-	public Integer runAsSystemUser() {
-	    int failures = 0;
-	    for (InfluxLine line : lines) {
-		try {
-		    IDeviceEvent event = InfluxWriteEventConverter.parseEvent(line);
-		    IDeviceEventContext context = InfluxWriteEventConverter.buildContext(tenantEngine, event);
-		    OutboundPayloadEnrichmentLogic.enrichAndDeliver(tenantEngine, context, event);
-		    WRITE_EVENTS_DELIVERED.inc();
-		} catch (Exception e) {
-		    failures++;
-		    WRITE_LINES_FAILED.inc();
-		    LOGGER.error(String.format("Unable to process line protocol entry: %s", line), e);
+    private static String getDatabase(HttpExchange exchange) {
+	String query = exchange.getRequestURI().getQuery();
+	if (query != null) {
+	    for (String param : query.split("&")) {
+		if (param.startsWith("db=")) {
+		    return param.substring(3);
 		}
 	    }
-	    return failures;
 	}
+	return null;
     }
 
-    protected IEventManagementMicroservice getMicroservice() {
-	return microservice;
+    private static String readBody(InputStream input) throws IOException {
+	ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+	byte[] chunk = new byte[4096];
+	int read;
+	while ((read = input.read(chunk)) != -1) {
+	    buffer.write(chunk, 0, read);
+	}
+	return new String(buffer.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    private static void respond(HttpExchange exchange, int status, String message) throws IOException {
+	byte[] body = message.getBytes(StandardCharsets.UTF_8);
+	exchange.sendResponseHeaders(status, body.length > 0 ? body.length : -1);
+	if (body.length > 0) {
+	    try (OutputStream out = exchange.getResponseBody()) {
+		out.write(body);
+	    }
+	}
     }
 }

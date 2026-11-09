@@ -57,9 +57,11 @@ Variables utiles :
 Autres commandes : `just delete-kind` (suppression du cluster),
 `just status` (état du déploiement), `just restart-microservices [services...]`
 (redémarrage un par un, en attendant la fin du démarrage de chacun ; event-management
-y tourne sur l'image de debug, retirée à chaque fois), `just publish-debug-image`
-(build de l'image de debug d'event-management depuis cette branche et push du tag
-`debug-async`), `just reset` (suppression de l'instance et
+y tourne sur l'image `async`, retirée à chaque fois), `just publish-image` (build
+d'event-management depuis cette branche et push du tag `async`, l'image par défaut
+de l'environnement de test, aussi appliquée par `deploy-kind`),
+`just publish-debug-image` (même chose en mode debug, tag `debug-async`, à utiliser
+avec `EVENT_IMAGE_TAG=debug-async`), `just reset` (suppression de l'instance et
 des bases `tenant_*`, puis redéploiement par `deploy-kind` — l'infrastructure
 est conservée), `just undeploy` (suppression instance + interfaces +
 infrastructure).
