@@ -25,4 +25,8 @@ push *services: publish-core
 
 push-changed: (push changed)
 
+# Run tests for all services, or only for given services. e.g. `just test service-event-management`
+test *services:
+    ./gradlew {{ if services == "" { "test" } else { prepend(":", append(":test", services)) } }}
+
 all: push

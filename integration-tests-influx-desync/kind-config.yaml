@@ -1,0 +1,72 @@
+# Kind cluster configuration for the InfluxDB desync integration tests:
+# two nodes only (1 control-plane + 1 worker; the main deployment uses 6
+# workers, see deploiments/techno/kind/kind-config.yaml). All pods share the
+# two nodes, which deploy-kind's placement handling accepts with a warning.
+# Uses the same image as deploiments (kindest/node:v1.24.17).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  # Control plane with the host port mappings of deploiments/techno/kind
+  # (database and NodePort access from the host; NodePorts are served by every
+  # node, so the mappings on the control plane cover the worker's pods too).
+  - role: control-plane
+    image: kindest/node:v1.24.17
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # PostgreSQL
+      - containerPort: 5432
+        hostPort: 5432
+        protocol: TCP
+      # InfluxDB API
+      - containerPort: 8086
+        hostPort: 8086
+        protocol: TCP
+      # InfluxDB RPC
+      - containerPort: 8088
+        hostPort: 8088
+        protocol: TCP
+      # Kafka
+      - containerPort: 9092
+        hostPort: 9092
+        protocol: TCP
+      # Redis
+      - containerPort: 6379
+        hostPort: 6379
+        protocol: TCP
+      # Mosquitto MQTT
+      - containerPort: 1883
+        hostPort: 1883
+        protocol: TCP
+      # SiteWhere REST HTTP
+      - containerPort: 8080
+        hostPort: 8080
+        protocol: TCP
+      # NodePort: Istio Ingress Gateway HTTP (30080)
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+      # NodePort: Istio Ingress Gateway MQTT (30883, echarde wasm plugin)
+      - containerPort: 30883
+        hostPort: 30883
+        protocol: TCP
+      # NodePort: InfluxDB (30007)
+      - containerPort: 30007
+        hostPort: 30007
+        protocol: TCP
+      # NodePort: Mosquitto (30366)
+      - containerPort: 30366
+        hostPort: 30366
+        protocol: TCP
+
+  # Single worker: the databases of the chart share it (placement preferred,
+  # not required)
+  - role: worker
+    image: kindest/node:v1.24.17
+
+networking:
+  #ipFamily: ipv6 # ipv4 only network

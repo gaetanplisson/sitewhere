@@ -1,0 +1,3 @@
+[submodule "deploiments"]
+	path = deploiments
+	url = git@gitlab.inria.fr:gplisson/deploiments.git

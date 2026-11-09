@@ -1,0 +1,120 @@
+# Justfile for the InfluxDB desync integration tests (branch `desync-influx`)
+#
+# The SiteWhere microservices need a Kubernetes control plane (SiteWhereInstance
+# and SiteWhereTenant CRDs) to bootstrap, so the tests run on a Kind cluster via
+# deploiments (git submodule at the repo root). Its `deploy-kind` recipe
+# deploys the infrastructure and creates an instance where all microservices
+# are scaled to 0 except device-management and event-management.
+
+# Name of the SiteWhere instance created by swctl
+INSTANCE_NAME := env("INSTANCE_NAME", "my-sitewhere")
+# Configuration template and image repository of the instance (deploiments defaults)
+INSTANCE_CONFIG := env("INSTANCE_CONFIG", "test")
+INSTANCE_REPO := env("INSTANCE_REPO", "gaetanplisson")
+# Microservices kept running by deploy-kind, restarted by restart-microservices
+MICROSERVICES := "instance-management device-management asset-management event-management inbound-processing event-sources"
+
+# Justfile of the SiteWhere deployment in the deploiments submodule
+SITWHERE_JUSTFILE := justfile_directory() / ".." / "deploiments" / "techno" / "sitewhere" / "Justfile"
+
+# Kind cluster: two nodes only (1 control-plane + 1 worker, kind-config.yaml),
+# instead of the 6 workers of deploiments/techno/kind. All env-overridable.
+CLUSTER_NAME := env("CLUSTER_NAME", "influx-desync")
+KIND_CONFIG := justfile_directory() / "kind-config.yaml"
+# Context kubectl of the cluster (kind names it kind-<CLUSTER_NAME>)
+KUBE_CONTEXT := env("KUBE_CONTEXT", "kind-" + CLUSTER_NAME)
+
+default:
+    @just --list
+
+# Create the two-node Kind cluster (kindest/node:v1.24.17), then run deploy-kind
+create-kind:
+    kind create cluster \
+        --name {{CLUSTER_NAME}} \
+        --config {{KIND_CONFIG}} \
+        --wait 5m
+    echo ""
+    echo "Cluster '{{CLUSTER_NAME}}' created (2 nodes, context kind-{{CLUSTER_NAME}}): run 'just deploy-kind'"
+
+# Delete the Kind cluster
+delete-kind:
+    kind delete cluster --name {{CLUSTER_NAME}}
+
+# Deploy SiteWhere on the Kind cluster: passthrough echarde WasmPlugins, no
+# Colvert, only device-management and event-management kept running (see the
+# deploy-kind recipe of the deploiments Justfile)
+deploy-kind:
+    just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" INSTANCE_CONFIG="{{INSTANCE_CONFIG}}" INSTANCE_REPO="{{INSTANCE_REPO}}" deploy-kind
+
+# Reset the SiteWhere instance: delete it (the operator stays deployed), purge the
+# tenant_* databases of Postgres and InfluxDB (undeploy-instance of the deploiments
+# Justfile), then rebuild it with deploy-kind. The infrastructure (databases, Keycloak,
+# Kafka, operator, interfaces) is kept, only the instance is recreated
+reset:
+    just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" undeploy-instance
+    just deploy-kind
+
+# Restart the microservices one at a time, or only the given ones, e.g.
+# `just restart-microservices event-management`. Each one must have finished starting
+# before the next is restarted, to avoid saturating the API server. Readiness cannot be
+# used: the microservices have no probes and a failed one stays "Running" forever, so
+# the logs of the new pod are read instead. Stops at the first failure.
+restart-microservices *SERVICES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kc="kubectl --context {{KUBE_CONTEXT}} -n {{INSTANCE_NAME}}"
+    newest_pod() {
+        $kc get pods --sort-by=.metadata.creationTimestamp -o name | grep "^pod/$1-" | tail -n 1 || true
+    }
+    wait_started() {
+        local logs
+        for _ in $(seq 1 60); do
+            logs=$($kc logs "$1" -c "$2" 2>/dev/null || true)
+            if grep -qE 'Microservice failed to start|Unhandled Exception' <<<"$logs"; then return 1; fi
+            if grep -q 'Startup time' <<<"$logs"; then return 0; fi
+            sleep 3
+        done
+        return 1
+    }
+    for ms in {{ if SERVICES == "" { MICROSERVICES } else { SERVICES } }}; do
+        echo "=== $ms"
+        previous=$(newest_pod "$ms")
+        $kc rollout restart "deployment/$ms"
+        pod="$previous"
+        for _ in $(seq 1 30); do
+            pod=$(newest_pod "$ms")
+            if [ "$pod" != "$previous" ]; then break; fi
+            sleep 2
+        done
+        if [ "$pod" = "$previous" ]; then
+            echo "$ms: no new pod created" >&2
+            exit 1
+        fi
+        if ! wait_started "$pod" "$ms"; then
+            echo "$ms: failed to start, see: $kc logs $pod -c $ms" >&2
+            exit 1
+        fi
+        echo "$ms: started ($pod)"
+    done
+
+# Print the deployment status of the cluster (KUBE_CONTEXT)
+status:
+    just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" status
+
+# Send a DeviceMeasurement to SiteWhere through MQTT as an available device,
+# like the devices of deploiments/iot/iot (echo-clock): JSON DeviceMeasurement
+# published on SiteWhere/<tenant>/input/json through the MQTT port of the
+# istio ingress gateway (NodePort 30883, exposed by deploy-infra). The device
+# is resolved via the REST API (first active assignment) when DEVICE is empty.
+# Implemented by the deploiments send-iot-message recipe, which also reads the
+# measurement back: needs event-sources, inbound-processing and
+# instance-management to run - they are scaled to 0 by deploy-kind, put their
+# replicas back to 1 before using it:
+#   kubectl patch swm -n <INSTANCE_NAME> event-sources inbound-processing instance-management --type merge -p '{"spec":{"replicas":1}}'
+send-iot-message DEVICE="" TENANT="default" NAME="engine.temperature" VALUE="42":
+    just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" \
+        send-iot-message "{{DEVICE}}" "{{TENANT}}" "{{NAME}}" "{{VALUE}}"
+
+# Undeploy SiteWhere (instance, interfaces and infrastructure)
+undeploy:
+    just --justfile {{SITWHERE_JUSTFILE}} KUBE_CONTEXT="{{KUBE_CONTEXT}}" INSTANCE_NAME="{{INSTANCE_NAME}}" undeploy
