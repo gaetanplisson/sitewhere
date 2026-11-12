@@ -9,3 +9,9 @@ dependencies {
     compile group: 'com.sitewhere', name: 'sitewhere-cassandra', version: "${rootProject.ext['sitewhere.integration.api.version']}"
     compile group: 'com.sitewhere', name: 'sitewhere-influxdb', version: "${rootProject.ext['sitewhere.integration.api.version']}"
 }
+
+// The Quarkus plugin runs tests on the JUnit Platform: the vintage engine runs
+// the JUnit 4 tests (version from the Quarkus BOM).
+dependencies {
+    testRuntimeOnly group: 'org.junit.vintage', name: 'junit-vintage-engine'
+}

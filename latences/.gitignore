@@ -1,0 +1,9 @@
+# Kubeconfig of the cluster (merged by deploiments/testbeds/grid5k, G5K_KUBECONFIG)
+kubeconfig
+# Enos environments, admin.conf and weekend configurations of the Grid5000 side
+g5k/*/current
+g5k/*/enos_*
+g5k/*/*-admin.conf
+g5k/*/conf-*-weekend.yaml
+# Figures and tables of plot
+results/

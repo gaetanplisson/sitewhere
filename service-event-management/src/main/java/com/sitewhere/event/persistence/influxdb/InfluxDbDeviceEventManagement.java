@@ -23,6 +23,7 @@ import java.util.UUID;
 import org.influxdb.dto.Point;
 
 import com.google.inject.Inject;
+import com.sitewhere.event.influxwrite.InfluxSubscriptionManager;
 import com.sitewhere.event.persistence.DeviceEventManagementPersistence;
 import com.sitewhere.event.spi.microservice.IEventManagementMicroservice;
 import com.sitewhere.influxdb.InfluxDbClient;
@@ -37,6 +38,7 @@ import com.sitewhere.rest.model.device.event.DeviceMeasurement;
 import com.sitewhere.rest.model.device.event.DeviceStateChange;
 import com.sitewhere.spi.SiteWhereException;
 import com.sitewhere.spi.SiteWhereSystemException;
+import com.sitewhere.spi.microservice.IMicroservice;
 import com.sitewhere.spi.device.IDeviceAssignment;
 import com.sitewhere.spi.device.command.IDeviceCommand;
 import com.sitewhere.spi.device.event.DeviceEventIndex;
@@ -117,6 +119,41 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
     @Override
     public void start(ILifecycleProgressMonitor monitor) throws SiteWhereException {
 	getClient().start(monitor);
+	ensureOutboundSubscription();
+    }
+
+    /**
+     * Create (or fix) the subscription copying the writes of the tenant database
+     * to the /write endpoint, which feeds the outbound topics. Runs before the
+     * persistence pipeline starts, so that no write precedes it. A failure is
+     * logged, not thrown: persistence keeps working, but nothing reaches outbound
+     * until the subscription exists.
+     */
+    protected void ensureOutboundSubscription() {
+	String database = getClient().getConfiguration().getDatabase();
+	try {
+	    IMicroservice<?, ?> microservice = getTenantEngine().getMicroservice();
+	    String destination = InfluxSubscriptionManager.resolveDestination(
+		    System.getenv(InfluxSubscriptionManager.DESTINATION_ENV),
+		    InfluxSubscriptionManager.defaultDestination(microservice.getIdentifier().getPath(),
+			    microservice.getInstanceSettings().getKubernetesNamespace(),
+			    microservice.getInstanceConfiguration().getInfrastructure().getMetrics().getHttpPort(),
+			    database));
+	    if (destination == null) {
+		getLogger().info(String.format("InfluxDB subscription management disabled by %s.",
+			InfluxSubscriptionManager.DESTINATION_ENV));
+		return;
+	    }
+	    String retention = getClient().getConfiguration().getRetention();
+	    InfluxSubscriptionManager.Action action = new InfluxSubscriptionManager(getClient().getInflux()::query)
+		    .ensureSubscription(database, retention, destination);
+	    getLogger().info(String.format("InfluxDB subscription '%s' on \"%s\".\"%s\" -> %s: %s",
+		    InfluxSubscriptionManager.SUBSCRIPTION_NAME, database, retention, destination, action));
+	} catch (Throwable t) {
+	    getLogger().error(String.format(
+		    "Unable to create the InfluxDB subscription of '%s': no event will reach the outbound topics.",
+		    database), t);
+	}
     }
 
     /*

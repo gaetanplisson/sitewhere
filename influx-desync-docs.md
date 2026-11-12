@@ -219,8 +219,29 @@ Lancement : `just test` (tous les services) ou `just test service-event-manageme
 
 ## Configuration InfluxDB attendue
 
-Côté InfluxDB, il faut créer une subscription sur la base du tenant pointant vers
-l'endpoint, par exemple :
+La subscription est créée par *event-management* lui-même, au démarrage de la
+persistance InfluxDB du tenant (`InfluxDbDeviceEventManagement.start()`, donc
+avant le démarrage du pipeline de persistance), via `InfluxSubscriptionManager` :
+
+- `SHOW SUBSCRIPTIONS`, puis recherche de `sitewhere_outbound` sur
+  `<database>.<retention>` (retention de la configuration du datastore) ;
+- absente → `CREATE` ; présente avec une autre destination → `DROP` + `CREATE` ;
+  identique → rien. Un `already exists` (replica concurrent) n'est pas une erreur ;
+- destination par défaut : le Service Kubernetes,
+  `http://event-management.<namespace>:<metrics-port>/write?db=<database>`, stable
+  entre redémarrages et réparti entre replicas (chaque write envoyé une seule fois) ;
+- variable d'environnement `SITEWHERE_INFLUX_SUBSCRIPTION_URL` : remplace la
+  destination, ou désactive la gestion avec la valeur `disabled` ;
+- la subscription n'est jamais supprimée à l'arrêt du tenant (sinon les writes
+  d'un rolling restart ne seraient plus recopiés) ;
+- un échec (par exemple utilisateur InfluxDB non admin) est loggué en erreur sans
+  bloquer la persistance : rien n'arrive alors sur outbound.
+
+Limite : seule la retention configurée est couverte ; un event écrit dans une
+retention policy choisie par la métadonnée d'assignment `INFLUX_RETENTION_POLICY`
+n'est pas recopié.
+
+L'équivalent manuel est :
 
 ```
 CREATE SUBSCRIPTION "sitewhere_outbound" ON "<database>"."autogen" DESTINATIONS ALL 'http://<host>:<metrics-port>/write?db=<database>'

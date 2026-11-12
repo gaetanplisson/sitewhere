@@ -1,0 +1,36 @@
+---
+# Cluster of the latency experiments (sitewhere/latences): 3 machines, 1 control plane + 2 workers (nodes of ../../clusters.yaml)
+kubespray_vars: #kubespray_source
+  kubespray_version: release-2.20 # git_branch - k8s v1.26.13
+  # git_repository_url
+vars: #kubespray_vars
+  enable_dual_stack_networks: false
+  kube_network_plugin: calico
+  local_path_provisioner_enabled: true
+g5k:
+  walltime: "07:53:52"
+  job_type: ["deploy", "allow_classic_ssh"]
+  # One job per site and name (enoslib): its own name, the jobs of the other deployments (sitewhere-nantes-edge...) untouched.
+  # Cluster, site and walltime: set by the placement (just reserve: set-walltime of testbeds/grid5k, regles.just)
+  job_name: sitewhere-latences
+  env_name: "debian11-nfs"
+  resources:
+    machines:
+      - roles: [kube_node, k8s_cluster]
+        cluster: dahu
+        # nodes and min: set from ../../clusters.yaml by the placement
+        nodes: 2
+        min: 2
+        primary_network: n1
+        secondary_networks: []
+      - roles: [etcd, kube_control_plane, kube_ingress, k8s_cluster, vault]
+        cluster: dahu
+        nodes: 1
+        min: 1
+        primary_network: n1
+        secondary_networks: []
+    networks:
+      - id: n1
+        type: prod
+        roles: ["my_network"]
+        site: grenoble

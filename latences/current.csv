@@ -1,0 +1,2 @@
+cluster_name,localisation,public_dns,private_dns,public_ip,private_ip,living,kube,deploiementstate,device_id
+latences,g5k,,,,,true,false,,latences-0

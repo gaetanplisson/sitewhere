@@ -1,0 +1,11 @@
+# Clusters of the latency experiments, read by deploiments/testbeds/grid5k (G5K_CLUSTERS_FILE of the justfile) instead of
+# deploiments/clusters.yaml: a single Grid5000 cluster, its directory g5k/<name>/ (G5K_SIDES_DIR) holding its configuration,
+# its enos environment (current) and its admin.conf, merged into ./kubeconfig (G5K_KUBECONFIG) under the context given.
+# - nodes: workers of the cluster (kube_node), the control plane excepted: 2 + 1 = 3 machines. Written in the configuration
+#   (nodes and min) by the placement (just reserve)
+grid5k:
+  latences:
+    context: latences
+    conf: conf-latences.yaml
+    nodes: 2
+    kube: true

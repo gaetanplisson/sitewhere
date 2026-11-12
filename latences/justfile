@@ -1,0 +1,236 @@
+# Latency experiments of SiteWhere on a single Grid5000 cluster with Kubernetes (3 machines: 1 control plane + 2 workers),
+# deployed by the recipes of deploiments (submodule at the repository root) focused on this cluster only:
+# - its reservation and Kubernetes: deploiments/testbeds/grid5k on clusters.yaml and g5k/ of this directory (G5K_CLUSTERS_FILE,
+#   G5K_SIDES_DIR), its own job name (sitewhere-latences): the other Grid5000 sides and their jobs are not touched
+# - its kubeconfig: ./kubeconfig (G5K_KUBECONFIG, KUBECONFIG of every recipe), context latences: ~/.kube/config is not touched
+# - SiteWhere without colvert, the echarde WasmPlugins passthrough (no remote cluster), the dataset of the IoT clusters
+#   (scenario real) with the single device of current.csv (latences-0)
+# - the experiment: echo-clock (test device in the cluster, Job, and its controller echo-clock-rust), Garage (S3 of the results)
+#   and xp-waiter (end of the experiment, echarde-sitewhere/xp-waiter)
+#
+#   just deploy                 # reserve + install: Kubernetes, Istio, SiteWhere infrastructure, monitoring
+#   just prepare-instance       # instance, Garage, xp-waiter, echo-clock started
+#   just wait-xp                # end of the experiment, results on Garage
+#   just run-xp my-xp 300 0.5   # another run on the same instance: started, xp-waiter waited for
+#   just plot my-xp             # figures of the run in results/my-xp/
+#   just destroy
+
+# Recipes of deploiments
+DEPLOIMENTS := justfile_directory() / ".." / "deploiments"
+TECHNO := DEPLOIMENTS / "techno"
+GRID5K_JUSTFILE := DEPLOIMENTS / "testbeds" / "grid5k" / "Justfile"
+TECHNO_JUSTFILE := TECHNO / "Justfile"
+ISTIO_JUSTFILE := TECHNO / "istio" / "Justfile"
+SITEWHERE_JUSTFILE := TECHNO / "sitewhere" / "Justfile"
+USECASE_JUSTFILE := TECHNO / "sitewhere" / "usecase" / "Justfile"
+TENANT_JUSTFILE := TECHNO / "sitewhere" / "usecase" / "tenant.just"
+GARAGE_JUSTFILE := TECHNO / "garage" / "Justfile"
+MONITORING_JUSTFILE := TECHNO / "monitoring" / "Justfile"
+IOT_JUSTFILE := TECHNO / "iot" / "Justfile"
+# xp-waiter and the analysis of the results (result/analyze.py): in the echarde-sitewhere repository (duplo-echarde), beside
+# this one by default
+ECHARDE_SITEWHERE := env("ECHARDE_SITEWHERE", clean(justfile_directory() / ".." / ".." / "duplo-echarde" / "echarde-sitewhere"))
+XP_WAITER_JUSTFILE := ECHARDE_SITEWHERE / "xp-waiter" / "Justfile"
+RESULT_DIR := ECHARDE_SITEWHERE / "result"
+# Virtualenv of result/ (polars, matplotlib: just venv of its Justfile)
+RESULT_PYTHON := RESULT_DIR / ".venv" / "bin" / "python"
+
+# The single Grid5000 cluster (side of clusters.yaml): read by the recipes and the scripts of testbeds/grid5k (g5k_paths.py)
+SIDE := "latences"
+export G5K_CLUSTERS_FILE := justfile_directory() / "clusters.yaml"
+export G5K_SIDES_DIR := justfile_directory() / "g5k"
+export G5K_KUBECONFIG := justfile_directory() / "kubeconfig"
+# Grid5000 cluster of the reservation: the only candidate of the placement (regles.just), G5K_CLUSTERS to change it
+export G5K_CLUSTERS := env("G5K_CLUSTERS", "dahu")
+# Every kubectl, helm, istioctl and swctl of the recipes on the kubeconfig of the cluster, its context
+export KUBECONFIG := G5K_KUBECONFIG
+# (context of the side in clusters.yaml)
+export KUBE_CONTEXT := "latences"
+
+# SiteWhere: instance, echarde WasmPlugins without remote cluster (echarde/charts/wasm-plugin/values-passthrough.yaml),
+# dataset of the IoT clusters of current.csv (sitewhere/scenario/real: a site latences, its device latences-0)
+export INSTANCE_NAME := env("INSTANCE_NAME", "my-sitewhere")
+export WASM_VALUES := "values-passthrough.yaml"
+export SCENARIO := "real"
+export CURRENT_CSV := justfile_directory() / "current.csv"
+# Test device of echo-clock: the device of current.csv (device_id)
+DEVICE_TOKEN := "latences-0"
+# 2 workers: prepare-nodes of sitewhere/Justfile does not warn (6 for one database per node), the databases share them
+export MIN_WORKER_NODES := "2"
+# xp-waiter: the cluster only (wait, reset-multiple), its Kafka export of the alerts of the device
+export XP_WAITER_CONTEXTS := KUBE_CONTEXT
+XP_WAITER_ARGS := "--set kafka.kind=alert --set-string 'kafka.deviceRegex=" + SIDE + "-[0-9]+'"
+
+# Experiment by default: seconds of messages of the device, proportion of local_enough alerts (otherwise measurements)
+DURATION := env("DURATION", "300")
+P_LOCAL := env("P_LOCAL", "0.5")
+
+# Default target: show help
+@default:
+    just --list
+
+# Reserve the cluster and install everything up to the SiteWhere infrastructure (no instance: prepare-instance)
+deploy: reserve install
+    @echo "Cluster {{KUBE_CONTEXT}} deployed: just prepare-instance"
+
+# testbeds/grid5k claim: the job sitewhere-latences reused (waited for if not started), reserved from now when there is none
+# (placement on the free clusters of regles.just, walltime until the next limit); its nodes deployed and Kubernetes
+# installed (kubespray) unless already there, admin.conf merged into ./kubeconfig. The VPN is down meanwhile
+# Reserve the 3 machines on Grid5000 and deploy Kubernetes on them
+reserve:
+    just -f {{GRID5K_JUSTFILE}} SIDES={{SIDE}} claim
+
+# Wait for Kubernetes on the cluster (states of its nodes, over ssh)
+wait-kube:
+    just -f {{GRID5K_JUSTFILE}} SIDES={{SIDE}} wait-kube
+
+# Steps (as install-multiple of techno for every cluster, on this one only):
+# 1. VPN up (the API server and the node ports are reached through it), API server waited for
+# 2. Istio (istio-ingressgateway: REST API and MQTT of the devices)
+# 3. SiteWhere infrastructure without colvert (Kafka, databases, Keycloak, operator, bridges) and the database interfaces
+# 4. Monitoring (kube-prometheus-stack): CPU, memory and IO of the pods, exported by xp-waiter at the end of the runs
+# Install Istio, the SiteWhere infrastructure and the monitoring on the cluster
+install:
+    echo "Step 1/4: VPN and API server of {{KUBE_CONTEXT}}..."
+    just -f {{TECHNO_JUSTFILE}} vpn-up
+    just wait-cluster
+    echo ""
+
+    echo "Step 2/4: Installing Istio..."
+    just -f {{ISTIO_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} install
+    echo ""
+
+    echo "Step 3/4: Deploying the SiteWhere infrastructure (without colvert) and the database interfaces..."
+    just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} COLVERT=false deploy-infra
+    just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} deploy-interfaces
+    echo ""
+
+    echo "Step 4/4: Installing the monitoring (Prometheus)..."
+    just -f {{MONITORING_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} install
+    echo ""
+
+    echo "SiteWhere infrastructure installed on {{KUBE_CONTEXT}}"
+
+# Wait until the API server of the cluster answers (5 minutes at most)
+wait-cluster:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for attempt in $(seq 1 30); do
+        if err=$(kubectl --context {{KUBE_CONTEXT}} get nodes --request-timeout=10s 2>&1 > /dev/null); then
+            kubectl --context {{KUBE_CONTEXT}} get nodes
+            exit 0
+        fi
+        echo "{{KUBE_CONTEXT}} not reachable yet (attempt $attempt/30): $(tail -n 1 <<< "$err")"
+        sleep 10
+    done
+    echo "{{KUBE_CONTEXT}} still unreachable after 5 minutes ({{KUBECONFIG}})" >&2
+    exit 1
+
+# After install. Steps:
+# 1. instance: Keycloak waited for, the instance created with the passthrough WasmPlugins and the dataset of current.csv,
+#    the unused microservices scaled down
+# 2. use case: Garage (S3 of the results, NodePort) and the tenant usecase (site latences, device latences-0)
+# 3. xp-waiter (NodePort 30808), its Kafka export of the alerts of the device
+# 4. echo-clock: start-xp (xp-waiter reset, controller and test device started)
+# Then: just wait-xp. xp_name: folder of the results on Garage (the date by default)
+# Create the SiteWhere instance and deploy Garage, xp-waiter and echo-clock
+prepare-instance xp_name="" duration=DURATION p_local=P_LOCAL:
+    echo "Step 1/4: Creating the SiteWhere instance '{{INSTANCE_NAME}}'..."
+    just -f {{TECHNO_JUSTFILE}} vpn-up
+    just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} wait-keycloak
+    just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} deploy-instance
+    just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} disable-microservices
+    echo ""
+
+    echo "Step 2/4: Deploying the use case (Garage, tenant usecase)..."
+    just -f {{USECASE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} post-instance
+    echo ""
+
+    echo "Step 3/4: Deploying xp-waiter..."
+    just -f {{XP_WAITER_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} deploy {{XP_WAITER_ARGS}}
+    echo ""
+
+    echo "Step 4/4: Starting echo-clock..."
+    just start-xp "{{xp_name}}" {{duration}} {{p_local}}
+    echo ""
+
+    just endpoints
+
+# The xp-waiter reset (new run), then the IoT release of techno/iot (re)installed: the controller echo-clock-rust (Deployment,
+# registered on the xp-waiter by its first poll) and the test device echo-clock DEVICE_TOKEN (Job: duration seconds of
+# messages, p_local local_enough alerts, its results aller / retour then pushed to Garage and its done told to the
+# xp-waiter). Returns once both are started. xp_name: folder of the results on Garage (the date by default)
+# Start a run of echo-clock on the instance
+start-xp xp_name="" duration=DURATION p_local=P_LOCAL:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    xp="{{xp_name}}"
+    [ -n "$xp" ] || xp="latences-$(date +%Y%m%d-%H%M%S)"
+    just -f {{XP_WAITER_JUSTFILE}} reset-multiple
+    IOT_WAIT_FOR_JOBS=false just -f {{IOT_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} start {{DEVICE_TOKEN}} \
+        --set device.kind=Job --set device.xpName="$xp" --set device.duration={{duration}} --set device.p={{p_local}}
+    echo "Run $xp started: {{DEVICE_TOKEN}} for {{duration}} s (p_local {{p_local}}), then just wait-xp"
+
+# The xp-waiter polled until the device is done, then the controller released: it stops once idle, uploads its results and
+# tells it; finished once the exports (Kafka, resources, InfluxDB) are done too. XP_WAITER_TIMEOUT=<s> to give up
+# Wait for the end of the run: device and controller done, results on Garage
+wait-xp:
+    just -f {{XP_WAITER_JUSTFILE}} wait
+
+# start-xp (xp-waiter reset, controller and test device started), then wait-xp (device done, controller released, its
+# results and the exports of the xp-waiter on Garage). Then: just plot <xp_name>
+# Launch a run of the experiment and wait for its end on the xp-waiter
+run-xp xp_name="" duration=DURATION p_local=P_LOCAL: (start-xp xp_name duration p_local) wait-xp
+
+# plot.py with the machinery of echarde-sitewhere/result/analyze.py, on this cluster: the run (xp_name, else the xp of the
+# device registered on the xp-waiter) and its state read from the xp-waiter, its Kafka export asked to it when missing from
+# Garage (/dump-kafka); the results read on Garage (NodePort of its node, through the VPN). Into results/<xp>/: summary.csv
+# (latency device -> controller, controller -> device and round trip, alerts and measurements; throughput), latency_*.png,
+# throughput.png, stages.csv / stages_*.png (SiteWhere hops, Kafka), resources.csv / resources_*.png (CPU, memory, IO).
+# Extra arguments to plot.py (--no-export, --warmup-max 0, --out DIR)
+# Plot the results of a run (latencies, throughput, SiteWhere stages, resources)
+plot xp_name="" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just -f {{RESULT_DIR}}/Justfile venv
+    k="kubectl --context {{KUBE_CONTEXT}}"
+    port=$($k get service garage -n garage -o jsonpath='{.spec.ports[?(@.name=="s3")].nodePort}')
+    node=$($k get pods -n garage -l app=garage -o jsonpath='{.items[0].spec.nodeName}')
+    ip=$($k get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+    xp="{{xp_name}}"
+    {{RESULT_PYTHON}} {{justfile_directory()}}/plot.py ${xp:+"$xp"} --context {{KUBE_CONTEXT}} \
+        --garage "http://$ip:$port" --analyze {{RESULT_DIR}} {{args}}
+
+# Alerts of the device not answered yet, lag of the SiteWhere consumers
+inflight:
+    just -f {{IOT_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} inflight
+
+# State of the xp-waiter (JSON)
+xp-status:
+    just -f {{XP_WAITER_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} status
+
+# Print the SiteWhere Admin UI, the database interfaces, Garage and xp-waiter of the cluster
+endpoints:
+    #!/usr/bin/env bash
+    # Each part printed even if another fails (not deployed yet)
+    just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} ui-info || true
+    just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} cluster-interfaces-endpoint || true
+    just -f {{GARAGE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} endpoint || true
+    port=$(kubectl --context {{KUBE_CONTEXT}} get service xp-waiter -n xp-waiter -o jsonpath='{.spec.ports[0].nodePort}' 2> /dev/null || true)
+    echo "[{{KUBE_CONTEXT}}] xp-waiter: ${port:+NodePort $port}${port:-not deployed}"
+
+# Deployment status of SiteWhere on the cluster
+status:
+    just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} status
+
+# Delete the instance (with echo-clock, the tenant databases purged), xp-waiter kept: prepare-instance recreates it
+undeploy-instance:
+    just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} undeploy-instance
+    just -f {{USECASE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} clean-pre-instance
+
+# Recreate the instance and start a run (Garage and xp-waiter kept)
+reset-instance xp_name="" duration=DURATION p_local=P_LOCAL: undeploy-instance (prepare-instance xp_name duration p_local)
+
+# Destroy the reservation of the cluster on Grid5000 (the job sitewhere-latences only)
+destroy:
+    just -f {{GRID5K_JUSTFILE}} SIDES={{SIDE}} destroy
