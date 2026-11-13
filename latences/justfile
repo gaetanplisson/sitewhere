@@ -50,11 +50,18 @@ export KUBE_CONTEXT := "latences"
 # SiteWhere: instance, echarde WasmPlugins without remote cluster (echarde/charts/wasm-plugin/values-passthrough.yaml),
 # dataset of the IoT clusters of current.csv (sitewhere/scenario/real: a site latences, its device latences-0)
 export INSTANCE_NAME := env("INSTANCE_NAME", "my-sitewhere")
+# Origin of the images of the SiteWhere microservices: <INSTANCE_REGISTRY>/<INSTANCE_REPO>/service-<name>:<INSTANCE_TAG>, set at the
+# creation of the instance (prepare-instance, reset-instance to change it). E.g. INSTANCE_REPO=grosinosky just reset-instance
+export INSTANCE_REGISTRY := env("INSTANCE_REGISTRY", "docker.io")
+export INSTANCE_REPO := env("INSTANCE_REPO", "gaetanplisson")
+export INSTANCE_TAG := env("INSTANCE_TAG", "3.0.5")
 export WASM_VALUES := "values-passthrough.yaml"
 export SCENARIO := "real"
 export CURRENT_CSV := justfile_directory() / "current.csv"
 # Test device of echo-clock: the device of current.csv (device_id)
 DEVICE_TOKEN := "latences-0"
+# Lock of prepare-instance (one run at a time)
+PREPARE_LOCK := justfile_directory() / ".prepare-instance.lock"
 # 2 workers: prepare-nodes of sitewhere/Justfile does not warn (6 for one database per node), the databases share them
 export MIN_WORKER_NODES := "2"
 # xp-waiter: the cluster only (wait, reset-multiple), its Kafka export of the alerts of the device
@@ -62,7 +69,7 @@ export XP_WAITER_CONTEXTS := KUBE_CONTEXT
 XP_WAITER_ARGS := "--set kafka.kind=alert --set-string 'kafka.deviceRegex=" + SIDE + "-[0-9]+'"
 
 # Experiment by default: seconds of messages of the device, proportion of local_enough alerts (otherwise measurements)
-DURATION := env("DURATION", "300")
+DURATION := env("DURATION", "60")
 P_LOCAL := env("P_LOCAL", "0.5")
 
 # Default target: show help
@@ -133,8 +140,21 @@ wait-cluster:
 # 3. xp-waiter (NodePort 30808), its Kafka export of the alerts of the device
 # 4. echo-clock: start-xp (xp-waiter reset, controller and test device started)
 # Then: just wait-xp. xp_name: folder of the results on Garage (the date by default)
+# Only one at a time (exclusive lock on PREPARE_LOCK, held by every command of the run): a second one fails at once.
+# Two runs interleaved mix their steps (e.g. WasmPlugins deployed after the instance was created)
 # Create the SiteWhere instance and deploy Garage, xp-waiter and echo-clock
 prepare-instance xp_name="" duration=DURATION p_local=P_LOCAL:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec 9> "{{PREPARE_LOCK}}"
+    if ! flock -n 9; then
+        echo "prepare-instance is already running on {{KUBE_CONTEXT}} (lock {{PREPARE_LOCK}} held), not launched" >&2
+        exit 1
+    fi
+    just _prepare-instance "{{xp_name}}" "{{duration}}" "{{p_local}}"
+
+[private]
+_prepare-instance xp_name duration p_local:
     echo "Step 1/4: Creating the SiteWhere instance '{{INSTANCE_NAME}}'..."
     just -f {{TECHNO_JUSTFILE}} vpn-up
     just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} wait-keycloak
@@ -166,7 +186,14 @@ start-xp xp_name="" duration=DURATION p_local=P_LOCAL:
     set -euo pipefail
     xp="{{xp_name}}"
     [ -n "$xp" ] || xp="latences-$(date +%Y%m%d-%H%M%S)"
+    # The simulators of the previous run gone first: its controller, still polling, would register on the new run of the
+    # xp-waiter right after the reset (a second backend never done: wait-xp stuck)
+    just -f {{IOT_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} undeploy
+    kubectl --context {{KUBE_CONTEXT}} wait --for=delete pod -n default -l 'app in (sitewhere-controller,sitewhere-device)' --timeout=120s
     just -f {{XP_WAITER_JUSTFILE}} reset-multiple
+    # Timers of the microservices at the start of the run (just service-latencies: their difference at its end)
+    {{RESULT_PYTHON}} {{justfile_directory()}}/service_latencies.py snapshot "{{justfile_directory()}}/results/$xp/service_timers_start.csv" \
+        --context {{KUBE_CONTEXT}} --namespace {{INSTANCE_NAME}} || echo "Timers of the microservices not saved (just service-latencies: totals)"
     IOT_WAIT_FOR_JOBS=false just -f {{IOT_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} start {{DEVICE_TOKEN}} \
         --set device.kind=Job --set device.xpName="$xp" --set device.duration={{duration}} --set device.p={{p_local}}
     echo "Run $xp started: {{DEVICE_TOKEN}} for {{duration}} s (p_local {{p_local}}), then just wait-xp"
@@ -201,6 +228,57 @@ plot xp_name="" *args:
     {{RESULT_PYTHON}} {{justfile_directory()}}/plot.py ${xp:+"$xp"} --context {{KUBE_CONTEXT}} \
         --garage "http://$ip:$port" --analyze {{RESULT_DIR}} {{args}}
 
+# plot.py --timestamps-only: results/<xp>/stage_timestamps.csv alone (no figures), a row per message sent (chain, device,
+# event_date in µs, warmup) and its original timestamp at each stage, integers since the epoch in the unit of its source:
+# aller_ns, event-source_us, inbound-processing_us, outbound-processing_us (Kafka records, ms resolution), backend_ns
+# (controller), command-invocation_us, retour_ns. Its Kafka export asked to the xp-waiter when missing. Extra arguments to plot.py
+# Export the original timestamps of every stage per message of a run (CSV)
+stage-timestamps xp_name="" *args:
+    just plot "{{xp_name}}" --timestamps-only {{args}}
+
+# service_latencies.py: the Prometheus timers of the microservices (port 9090 of their pods, not scraped by the monitoring):
+# inbound-processing (device / assignment lookup), device-state (merge / lookup). For the run xp_name (by default the last one
+# started with a snapshot, results/<xp>/service_timers_start.csv saved by start-xp): their difference since its start;
+# without a snapshot, their totals since the start of the pods (results/service-<date>/). Into the directory of the run:
+# service_latencies.csv (count, mean, p50/p90/p99 in ms per timer), service_latencies_buckets.csv, service_latencies.png
+# Latencies measured by the SiteWhere microservices (CSV and PNG)
+service-latencies xp_name="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just -f {{RESULT_DIR}}/Justfile venv > /dev/null
+    results="{{justfile_directory()}}/results"
+    xp="{{xp_name}}"
+    if [ -z "$xp" ]; then
+        last=$(ls -t "$results"/*/service_timers_start.csv 2> /dev/null | head -1 || true)
+        [ -n "$last" ] && xp=$(basename "$(dirname "$last")")
+    fi
+    if [ -n "$xp" ]; then out="$results/$xp"; title="$xp"; else out="$results/service-$(date +%Y%m%d-%H%M%S)"; title="no run"; fi
+    echo "Timers of the microservices of {{INSTANCE_NAME}} on {{KUBE_CONTEXT}} (${xp:-no run: totals since the start of the pods})"
+    {{RESULT_PYTHON}} {{justfile_directory()}}/service_latencies.py report "$out" --context {{KUBE_CONTEXT}} \
+        --namespace {{INSTANCE_NAME}} --start "$out/service_timers_start.csv" --title "$title"
+
+# kafka_clients_metrics.py: the metrics of the Kafka producers and consumers of the microservices (JMX: not on their Prometheus
+# endpoint), sampled every interval seconds for duration seconds (DURATION + 30 by default: a whole run), all the services in
+# parallel. To run during a run: just start-xp && just kafka-clients-metrics && just wait-xp. Into results/<xp>/ (the run
+# by default as service-latencies, else results/kafka-<date>/): kafka_clients_metrics.csv (every sample) and
+# kafka_clients_summary.csv (mean, max, last, delta of the counters). Kafka averages its avg / max over ~30 s; at rest a
+# consumer shows fetch-latency ~ fetch.max.wait.ms (1000 ms: the broker holds the empty fetch)
+# Sample the metrics of the Kafka clients of the microservices during a run (CSV)
+kafka-clients-metrics xp_name="" duration="" interval="5":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    results="{{justfile_directory()}}/results"
+    xp="{{xp_name}}"
+    if [ -z "$xp" ]; then
+        last=$(ls -t "$results"/*/service_timers_start.csv 2> /dev/null | head -1 || true)
+        [ -n "$last" ] && xp=$(basename "$(dirname "$last")")
+    fi
+    out="$results/${xp:-kafka-$(date +%Y%m%d-%H%M%S)}"
+    duration="{{duration}}"
+    [ -n "$duration" ] || duration=$(( {{DURATION}} + 30 ))
+    python3 {{justfile_directory()}}/kafka_clients_metrics.py "$out" --context {{KUBE_CONTEXT}} --namespace {{INSTANCE_NAME}} \
+        --interval {{interval}} --duration "$duration"
+
 # Alerts of the device not answered yet, lag of the SiteWhere consumers
 inflight:
     just -f {{IOT_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} inflight
@@ -217,7 +295,7 @@ endpoints:
     just -f {{SITEWHERE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} cluster-interfaces-endpoint || true
     just -f {{GARAGE_JUSTFILE}} KUBE_CONTEXT={{KUBE_CONTEXT}} endpoint || true
     port=$(kubectl --context {{KUBE_CONTEXT}} get service xp-waiter -n xp-waiter -o jsonpath='{.spec.ports[0].nodePort}' 2> /dev/null || true)
-    echo "[{{KUBE_CONTEXT}}] xp-waiter: ${port:+NodePort $port}${port:-not deployed}"
+    if [ -n "$port" ]; then echo "[{{KUBE_CONTEXT}}] xp-waiter: NodePort $port"; else echo "[{{KUBE_CONTEXT}}] xp-waiter: not deployed"; fi
 
 # Deployment status of SiteWhere on the cluster
 status:
@@ -230,6 +308,32 @@ undeploy-instance:
 
 # Recreate the instance and start a run (Garage and xp-waiter kept)
 reset-instance xp_name="" duration=DURATION p_local=P_LOCAL: undeploy-instance (prepare-instance xp_name duration p_local)
+
+# The context of the cluster copied into ~/.kube/config (kubectl --context latences from anywhere), its own kubeconfig
+# untouched: its cluster and user renamed latences / latences-admin (kubespray names them cluster.local / kubernetes-admin,
+# as the other Grid5000 clusters of ~/.kube/config), the previous latences entries replaced, the other contexts and the
+# current one kept; ~/.kube/config saved first (~/.kube/config.bak-<date>). After each reserve: the cluster changes
+# Add (or refresh) the context of the cluster in ~/.kube/config
+kube-context:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    home="$HOME/.kube/config"
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    KUBECONFIG="{{KUBECONFIG}}" kubectl config view --raw --flatten --minify --context {{KUBE_CONTEXT}} \
+        | yq '.clusters[0].name = "{{KUBE_CONTEXT}}" | .users[0].name = "{{KUBE_CONTEXT}}-admin"
+              | .contexts[0].name = "{{KUBE_CONTEXT}}" | .contexts[0].context.cluster = "{{KUBE_CONTEXT}}"
+              | .contexts[0].context.user = "{{KUBE_CONTEXT}}-admin" | .current-context = "{{KUBE_CONTEXT}}"' > "$tmp/cluster"
+    mkdir -p "$(dirname "$home")"; touch "$home"
+    cp "$home" "$home.bak-$(date +%Y%m%d-%H%M%S)"
+    cp "$home" "$tmp/home"
+    for kind in context cluster user; do
+        name={{KUBE_CONTEXT}}; [ "$kind" = user ] && name={{KUBE_CONTEXT}}-admin
+        KUBECONFIG="$tmp/home" kubectl config "delete-$kind" "$name" > /dev/null 2>&1 || true
+    done
+    # The first file wins: the current context of ~/.kube/config kept
+    KUBECONFIG="$tmp/home:$tmp/cluster" kubectl config view --raw --flatten > "$tmp/merged"
+    install -m 600 "$tmp/merged" "$home"
+    echo "Context {{KUBE_CONTEXT}} in $home: $(kubectl --kubeconfig "$home" config view -o jsonpath='{.clusters[?(@.name=="{{KUBE_CONTEXT}}")].cluster.server}')"
 
 # Destroy the reservation of the cluster on Grid5000 (the job sitewhere-latences only)
 destroy:

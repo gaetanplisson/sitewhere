@@ -37,6 +37,8 @@ parser.add_argument("--no-export", action="store_true", help="only the Kafka exp
 parser.add_argument("--export-timeout", type=int, default=600, help="seconds waited for the Kafka export asked")
 parser.add_argument("--warmup-max", type=float, default=60, help="warm-up left out, at most this many seconds")
 parser.add_argument("--warmup-fraction", type=float, default=0.15, help="warm-up left out, at most this fraction of the run")
+parser.add_argument("--timestamps-only", action="store_true",
+                    help="only stage_timestamps.csv (original timestamps of every stage per message), no figures")
 args = parser.parse_args()
 
 sys.path.insert(0, args.analyze)
@@ -89,6 +91,36 @@ retour = frames["retour"] if frames["retour"] is not None else aller.clear()
 ctrl = frames["controller"] if frames["controller"] is not None else aller.clear()
 print("  read: aller {}, retour {}, controller {} rows".format(aller.height, retour.height, ctrl.height))
 
+# Keys (event_date) in microseconds everywhere. aller: the eventDate set by echo-clock, in µs; retour: the originEventDate
+# of the command, which SiteWhere keeps in ms only (a Java Date). A key in ms (< 1e14: 13 digits, a µs key has 16) is
+# replaced by the µs key of the aller of the same device, type and millisecond (unique per device and type: one message
+# per type in flight); one found in no aller stays without key (null). The timestamps themselves are datetimes (ns for the
+# device and the controller, Kafka: µs at ms resolution), compared in ns: no conversion needed
+US_KEYS = (aller.filter(pl.col("event_date") > 0)
+           .select("device", "type", pl.col("event_date").alias("_us"), (pl.col("event_date") // 1000).alias("_ms"))
+           .unique(["device", "type", "_ms"], keep="first"))
+
+
+def keys_in_us(frame, name):
+    if frame is None or "event_date" not in frame.columns:
+        return frame
+    is_ms = (pl.col("event_date") > 0) & (pl.col("event_date") < 10 ** 14)
+    n_ms = frame.filter(is_ms).height
+    if n_ms == 0:
+        return frame
+    out = (frame.with_columns(pl.when(is_ms).then(pl.col("event_date")).alias("_key_ms"))
+           .join(US_KEYS, left_on=["device", "type", "_key_ms"], right_on=["device", "type", "_ms"], how="left")
+           .with_columns(pl.when(is_ms).then(pl.col("_us")).otherwise(pl.col("event_date")).alias("event_date"))
+           .drop("_key_ms", "_us"))
+    missing = frame.filter(is_ms).join(US_KEYS, left_on=["device", "type", "event_date"], right_on=["device", "type", "_ms"],
+                                       how="anti").height
+    print("  {}: {} keys in ms set back in µs from aller ({} found in no aller)".format(name, n_ms, missing))
+    return out
+
+
+retour = keys_in_us(retour, "retour")
+ctrl = keys_in_us(ctrl, "controller")
+
 start, end, warmup, cutoff = an.warmup_cutoff(aller, args.warmup_max, args.warmup_fraction)
 print("  run {:.0f} s: the first {:.1f} s left out (warm-up), results from {}".format((end - start).total_seconds(), warmup, cutoff))
 
@@ -122,6 +154,42 @@ report = pl.DataFrame(report)
 report.write_csv(os.path.join(out, "alignment.csv"))
 with pl.Config(tbl_cols=-1, tbl_rows=-1, tbl_width_chars=200):
     print(report.drop("devices_out_list"))
+
+
+# Original timestamps of every stage, a row per message sent (chain, device, event_date: its key in µs, warmup: sent before
+# the end of the warm-up). A column per stage in its source unit, integers since the epoch (UTC): <stage>_ns for the files of
+# echo-clock (aller, retour) and of the controller (backend), <stage>_us for the Kafka exports of the xp-waiter (timestamps
+# of the records: µs at ms resolution); empty when the message was not seen there (or not aligned: alignment.csv)
+KAFKA_STAGE_NAMES = {name for name, _, _ in an.KAFKA_STAGES} | {an.COMMAND_STAGE[0]}
+
+
+def stage_timestamps(chains):
+    frames = []
+    for chain, stages in chains:
+        wide = None
+        for name, df in stages:
+            unit = "us" if name in KAFKA_STAGE_NAMES else "ns"
+            ns = pl.col("timestamp").cast(pl.Datetime("ns", "UTC")).dt.epoch("ns")
+            col = (ns // 1000 if unit == "us" else ns).alias("{}_{}".format(name, unit))
+            f = (df.filter(pl.col("type") == chain).select("device", "event_date", col)
+                 .unique(["device", "event_date"], keep="first", maintain_order=True))
+            wide = f if wide is None else wide.join(f, on=["device", "event_date"], how="left")
+        sent = "aller_ns"
+        frames.append(wide.select(pl.lit(chain).alias("chain"), "device", "event_date",
+                                  (pl.col(sent) < pl.lit(cutoff).cast(pl.Datetime("ns", "UTC")).dt.epoch("ns")).alias("warmup"),
+                                  pl.exclude("device", "event_date")))
+    return pl.concat(frames, how="diagonal").sort("chain", "device", "aller_ns")
+
+
+if chains:
+    ts = stage_timestamps(chains)
+    ts.write_csv(os.path.join(out, "stage_timestamps.csv"))
+    print("  stage timestamps: {} messages, columns {} -> stage_timestamps.csv".format(ts.height, ", ".join(ts.columns[4:])))
+elif args.timestamps_only:
+    sys.exit("No Kafka export of {} on the Garage: no stage timestamps".format(xp))
+if args.timestamps_only:
+    print("-> {}".format(out))
+    sys.exit(0)
 
 summaries, matched_all, tps = [], [], []
 
@@ -170,6 +238,21 @@ if chains:
         .sort("chain", pl.col("hop").str.split(" -> ").list.first().replace_strict(
             {s: i for i, s in enumerate(an.STAGE_ORDER)}, return_dtype=pl.Int32)))
     stage_summary.write_csv(os.path.join(out, "stages.csv"))
+    # Breakdown per message: a row per message (chain, device, event_date in µs, sent: its publication by the device), the
+    # latency of each hop in ms (columns in the order of the stages, empty when the message was not seen at both ends), and
+    # total_ms their sum over the hops it went through (hops: the number of them)
+    order = {s: i for i, s in enumerate(an.STAGE_ORDER)}
+    hop_names = sorted(hops["hop"].unique().to_list(), key=lambda h: order.get(h.split(" -> ")[0], 99))
+    breakdown = (hops.with_columns(pl.col("sent").min().over("chain", "device", "event_date").alias("published"))
+                 .pivot("hop", index=["chain", "device", "event_date", "published"], values="latency_ms", aggregate_function="first"))
+    breakdown = (breakdown.select("chain", "device", "event_date", pl.col("published").alias("sent"),
+                                  *[pl.col(h) if h in breakdown.columns else pl.lit(None, pl.Float64).alias(h) for h in hop_names])
+                 .with_columns(pl.sum_horizontal(hop_names).alias("total_ms"),
+                               pl.sum_horizontal([pl.col(h).is_not_null() for h in hop_names]).alias("hops"))
+                 .rename({h: "{}_ms".format(h.replace(" -> ", "__")) for h in hop_names})
+                 .sort("chain", "device", "sent"))
+    breakdown.write_csv(os.path.join(out, "stage_breakdown.csv"))
+    print("  stage breakdown: {} messages -> stage_breakdown.csv".format(breakdown.height))
     with pl.Config(tbl_cols=-1, tbl_rows=-1, tbl_width_chars=200, float_precision=1):
         print(stage_summary)
     an.stage_plots(xp, out, hops, stage_tp, start)

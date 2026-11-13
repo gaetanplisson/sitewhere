@@ -8,7 +8,7 @@ vars: #kubespray_vars
   kube_network_plugin: calico
   local_path_provisioner_enabled: true
 g5k:
-  walltime: "07:53:52"
+  walltime: "09:45:27"
   job_type: ["deploy", "allow_classic_ssh"]
   # One job per site and name (enoslib): its own name, the jobs of the other deployments (sitewhere-nantes-edge...) untouched.
   # Cluster, site and walltime: set by the placement (just reserve: set-walltime of testbeds/grid5k, regles.just)

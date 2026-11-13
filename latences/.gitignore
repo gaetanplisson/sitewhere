@@ -7,3 +7,5 @@ g5k/*/*-admin.conf
 g5k/*/conf-*-weekend.yaml
 # Figures and tables of plot
 results/
+# Lock of prepare-instance
+.prepare-instance.lock
