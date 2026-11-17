@@ -6,8 +6,10 @@ dependencies {
 	// SiteWhere microservice library including gRPC support.	
     compile group: 'com.sitewhere', name: 'sitewhere-grpc-client', version: "${rootProject.ext['sitewhere.microservice.api.version']}"
 
-    // SiteWhere RDB integration.   
-    compile group: 'com.sitewhere', name: 'sitewhere-rdb', version: "${rootProject.ext['sitewhere.integration.api.version']}"
+    // SiteWhere RDB integration. Kept at 3.0.2: sitewhere-rdb 3.0.11e brings the Spring Boot 2.4.4 BOM, whose netty
+    // 4.1.60 (Quarkus 1.7.2 / vert.x 3.9.2 expect 4.1.49) makes the REST server drop every request with a body
+    // (POST /api/tenants: connection closed, no response, nothing logged)
+    compile group: 'com.sitewhere', name: 'sitewhere-rdb', version: '3.0.2'
 
 	// Quarkus RESTEasy extension.
     compile 'io.quarkus:quarkus-resteasy-jackson'
