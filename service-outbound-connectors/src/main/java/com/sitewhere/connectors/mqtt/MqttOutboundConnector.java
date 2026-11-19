@@ -228,7 +228,16 @@ public class MqttOutboundConnector extends SerialOutboundConnector implements IM
      * @throws SiteWhereException
      */
     protected void publish(IDeviceEvent event, String topic) throws SiteWhereException {
-	connection.publish(topic, MarshalUtils.marshalJson(event), QoS.AT_LEAST_ONCE, false);
+	// PUBACK waited for: one message in flight (the connector is serial), as the
+	// clients of the microbenchmarks
+	try {
+	    connection.publish(topic, MarshalUtils.marshalJson(event), QoS.AT_LEAST_ONCE, false)
+		    .await(MqttLifecycleComponent.DEFAULT_PUBACK_TIMEOUT_SECS, TimeUnit.SECONDS);
+	} catch (SiteWhereException e) {
+	    throw e;
+	} catch (Exception e) {
+	    throw new SiteWhereException("Unable to publish event to MQTT topic " + topic + ".", e);
+	}
     }
 
     /*

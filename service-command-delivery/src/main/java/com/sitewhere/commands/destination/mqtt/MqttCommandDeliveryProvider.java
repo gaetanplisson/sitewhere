@@ -16,6 +16,7 @@
 package com.sitewhere.commands.destination.mqtt;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import org.fusesource.hawtdispatch.ShutdownException;
 import org.fusesource.mqtt.client.FutureConnection;
@@ -96,7 +97,9 @@ public class MqttCommandDeliveryProvider extends MqttLifecycleComponent
 	    IDeviceCommandExecution execution, byte[] encoded, MqttParameters params) throws SiteWhereException {
 	try {
 	    getLogger().info("About to publish command message to topic: " + params.getCommandTopic());
-	    connection.publish(params.getCommandTopic(), encoded, QoS.AT_LEAST_ONCE, false);
+	    // PUBACK waited for: one message in flight, as the clients of the microbenchmarks
+	    connection.publish(params.getCommandTopic(), encoded, QoS.AT_LEAST_ONCE, false)
+		    .await(DEFAULT_PUBACK_TIMEOUT_SECS, TimeUnit.SECONDS);
 	    getLogger().info("Command published.");
 	} catch (Exception e) {
 	    throw new SiteWhereException("Unable to publish command to MQTT topic.", e);
@@ -114,7 +117,8 @@ public class MqttCommandDeliveryProvider extends MqttLifecycleComponent
 	    byte[] encoded, MqttParameters params) throws SiteWhereException {
 	try {
 	    getLogger().info("About to publish system message to topic: " + params.getSystemTopic());
-	    connection.publish(params.getSystemTopic(), encoded, QoS.AT_LEAST_ONCE, false);
+	    connection.publish(params.getSystemTopic(), encoded, QoS.AT_LEAST_ONCE, false)
+		    .await(DEFAULT_PUBACK_TIMEOUT_SECS, TimeUnit.SECONDS);
 	    getLogger().info("Command published.");
 	} catch (Exception e) {
 	    throw new SiteWhereException("Unable to publish command to MQTT topic.", e);
