@@ -17,7 +17,9 @@ package com.sitewhere.inbound.kafka;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.kafka.streams.KeyValue;
 
@@ -47,6 +49,9 @@ public class DeviceAssignmentsLookupMapper
 
     /** Configuration */
     private IInboundProcessingConfiguration configuration;
+
+    /** Local cache of active assignments by device id (no eviction, empty lists not cached) */
+    private final Map<UUID, List<? extends IDeviceAssignment>> assignmentsByDevice = new ConcurrentHashMap<>();
 
     public DeviceAssignmentsLookupMapper(IInboundProcessingConfiguration configuration) {
 	this.configuration = configuration;
@@ -95,8 +100,13 @@ public class DeviceAssignmentsLookupMapper
 	    final Histogram.Timer assignmentLookupTime = ASSIGNMENT_LOOKUP_TIMER.labels(getTenantEngine().buildLabels())
 		    .startTimer();
 	    try {
-		List<? extends IDeviceAssignment> assignments = getDeviceManagement()
-			.getActiveDeviceAssignments(context.getDevice().getId());
+		List<? extends IDeviceAssignment> assignments = assignmentsByDevice.get(context.getDevice().getId());
+		if (assignments == null) {
+		    assignments = getDeviceManagement().getActiveDeviceAssignments(context.getDevice().getId());
+		    if (!assignments.isEmpty()) {
+			assignmentsByDevice.put(context.getDevice().getId(), assignments);
+		    }
+		}
 		InboundEventContext updated = new InboundEventContext(context.getDecodedEventPayload());
 		updated.setDevice(context.getDevice());
 		updated.setDeviceAssignments(assignments);

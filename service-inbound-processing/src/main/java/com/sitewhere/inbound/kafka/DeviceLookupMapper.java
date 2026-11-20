@@ -15,7 +15,9 @@
  */
 package com.sitewhere.inbound.kafka;
 
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.kafka.streams.KeyValue;
 
@@ -46,6 +48,9 @@ public class DeviceLookupMapper
 
     /** Configuration */
     private IInboundProcessingConfiguration configuration;
+
+    /** Local cache of devices by token (no eviction, unknown tokens not cached) */
+    private final Map<String, IDevice> devicesByToken = new ConcurrentHashMap<>();
 
     public DeviceLookupMapper(IInboundProcessingConfiguration configuration) {
 	this.configuration = configuration;
@@ -94,7 +99,13 @@ public class DeviceLookupMapper
 		    .startTimer();
 	    try {
 		InboundEventContext context = new InboundEventContext(payload);
-		IDevice existing = getDeviceManagement().getDeviceByToken(payload.getDeviceToken());
+		IDevice existing = devicesByToken.get(payload.getDeviceToken());
+		if (existing == null) {
+		    existing = getDeviceManagement().getDeviceByToken(payload.getDeviceToken());
+		    if (existing != null) {
+			devicesByToken.put(payload.getDeviceToken(), existing);
+		    }
+		}
 		context.setDevice(existing);
 
 		if (existing != null) {

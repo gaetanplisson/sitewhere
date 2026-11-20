@@ -16,6 +16,9 @@
 package com.sitewhere.commands;
 
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.sitewhere.commands.routing.CommandRoutingLogic;
 import com.sitewhere.commands.spi.ICommandExecutionBuilder;
@@ -55,6 +58,12 @@ public class DefaultCommandProcessingStrategy extends TenantEngineLifecycleCompo
     /** Configured command execution builder */
     private ICommandExecutionBuilder commandExecutionBuilder = new DefaultCommandExecutionBuilder();
 
+    /** Local cache of device commands by id (no eviction, missing commands not cached) */
+    private final Map<UUID, IDeviceCommand> commandsById = new ConcurrentHashMap<>();
+
+    /** Local cache of active assignments by device id (no eviction, empty lists not cached) */
+    private final Map<UUID, List<? extends IDeviceAssignment>> assignmentsByDevice = new ConcurrentHashMap<>();
+
     public DefaultCommandProcessingStrategy() {
 	super(LifecycleComponentType.CommandProcessingStrategy);
     }
@@ -92,7 +101,13 @@ public class DefaultCommandProcessingStrategy extends TenantEngineLifecycleCompo
 	 */
 	@Override
 	public void runAsSystemUser() throws SiteWhereException {
-	    IDeviceCommand command = getDeviceManagement().getDeviceCommand(invocation.getDeviceCommandId());
+	    IDeviceCommand command = commandsById.get(invocation.getDeviceCommandId());
+	    if (command == null) {
+		command = getDeviceManagement().getDeviceCommand(invocation.getDeviceCommandId());
+		if (command != null) {
+		    commandsById.put(invocation.getDeviceCommandId(), command);
+		}
+	    }
 	    if (command != null) {
 		IDeviceCommandExecution execution = getCommandExecutionBuilder().createExecution(command, invocation);
 		List<IDeviceAssignment> assignments = getCommandTargetResolver().resolveTargets(invocation);
@@ -102,8 +117,13 @@ public class DefaultCommandProcessingStrategy extends TenantEngineLifecycleCompo
 			throw new SiteWhereException("Targeted assignment references device that does not exist.");
 		    }
 
-		    List<? extends IDeviceAssignment> active = getDeviceManagement()
-			    .getActiveDeviceAssignments(device.getId());
+		    List<? extends IDeviceAssignment> active = assignmentsByDevice.get(device.getId());
+		    if (active == null) {
+			active = getDeviceManagement().getActiveDeviceAssignments(device.getId());
+			if (!active.isEmpty()) {
+			    assignmentsByDevice.put(device.getId(), active);
+			}
+		    }
 		    IDeviceNestingContext nesting = NestedDeviceSupport.calculateNestedDeviceInformation(device,
 			    getTenantEngine().getTenantResource());
 		    CommandRoutingLogic.routeCommand(getOutboundCommandRouter(),
