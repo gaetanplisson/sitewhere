@@ -17,7 +17,9 @@ package com.sitewhere.commands.routing;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.sitewhere.commands.configuration.router.devicetypemapping.DeviceTypeMapping;
 import com.sitewhere.commands.configuration.router.devicetypemapping.DeviceTypeMappingConfiguration;
@@ -42,6 +44,9 @@ public class DeviceTypeMappingCommandRouter extends OutboundCommandRouter {
 
     /** Configuration */
     private DeviceTypeMappingConfiguration configuration;
+
+    /** Local cache of device types by id (no eviction, missing device types not cached) */
+    private final Map<UUID, IDeviceType> deviceTypesById = new ConcurrentHashMap<>();
 
     public DeviceTypeMappingCommandRouter(DeviceTypeMappingConfiguration configuration) {
 	this.configuration = configuration;
@@ -82,7 +87,13 @@ public class DeviceTypeMappingCommandRouter extends OutboundCommandRouter {
     protected List<ICommandDestination<?, ?>> getDestinationsForDevice(IDeviceNestingContext nesting)
 	    throws SiteWhereException {
 	UUID deviceTypeId = nesting.getGateway().getDeviceTypeId();
-	IDeviceType deviceType = getDeviceManagement().getDeviceType(deviceTypeId);
+	IDeviceType deviceType = deviceTypesById.get(deviceTypeId);
+	if (deviceType == null) {
+	    deviceType = getDeviceManagement().getDeviceType(deviceTypeId);
+	    if (deviceType != null) {
+		deviceTypesById.put(deviceTypeId, deviceType);
+	    }
+	}
 	List<ICommandDestination<?, ?>> matches = new ArrayList<>();
 	for (DeviceTypeMapping mapping : getConfiguration().getMappings()) {
 	    if (mapping.getDeviceTypeToken() == deviceType.getToken()) {

@@ -61,6 +61,9 @@ public class DefaultCommandProcessingStrategy extends TenantEngineLifecycleCompo
     /** Local cache of device commands by id (no eviction, missing commands not cached) */
     private final Map<UUID, IDeviceCommand> commandsById = new ConcurrentHashMap<>();
 
+    /** Local cache of devices by id (no eviction, missing devices not cached) */
+    private final Map<UUID, IDevice> devicesById = new ConcurrentHashMap<>();
+
     /** Local cache of active assignments by device id (no eviction, empty lists not cached) */
     private final Map<UUID, List<? extends IDeviceAssignment>> assignmentsByDevice = new ConcurrentHashMap<>();
 
@@ -112,7 +115,13 @@ public class DefaultCommandProcessingStrategy extends TenantEngineLifecycleCompo
 		IDeviceCommandExecution execution = getCommandExecutionBuilder().createExecution(command, invocation);
 		List<IDeviceAssignment> assignments = getCommandTargetResolver().resolveTargets(invocation);
 		for (IDeviceAssignment assignment : assignments) {
-		    IDevice device = getDeviceManagement().getDevice(assignment.getDeviceId());
+		    IDevice device = devicesById.get(assignment.getDeviceId());
+		    if (device == null) {
+			device = getDeviceManagement().getDevice(assignment.getDeviceId());
+			if (device != null) {
+			    devicesById.put(assignment.getDeviceId(), device);
+			}
+		    }
 		    if (device == null) {
 			throw new SiteWhereException("Targeted assignment references device that does not exist.");
 		    }

@@ -17,6 +17,9 @@ package com.sitewhere.commands;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.sitewhere.commands.spi.ICommandTargetResolver;
 import com.sitewhere.commands.spi.microservice.ICommandDeliveryMicroservice;
@@ -34,6 +37,9 @@ import com.sitewhere.spi.microservice.lifecycle.LifecycleComponentType;
  */
 public class DefaultCommandTargetResolver extends TenantEngineLifecycleComponent implements ICommandTargetResolver {
 
+    /** Local cache of assignments by id (no eviction, missing assignments not cached) */
+    private final Map<UUID, IDeviceAssignment> assignmentsById = new ConcurrentHashMap<>();
+
     public DefaultCommandTargetResolver() {
 	super(LifecycleComponentType.CommandTargetResolver);
     }
@@ -46,7 +52,13 @@ public class DefaultCommandTargetResolver extends TenantEngineLifecycleComponent
      */
     @Override
     public List<IDeviceAssignment> resolveTargets(IDeviceCommandInvocation invocation) throws SiteWhereException {
-	IDeviceAssignment assignment = getDeviceManagement().getDeviceAssignment(invocation.getDeviceAssignmentId());
+	IDeviceAssignment assignment = assignmentsById.get(invocation.getDeviceAssignmentId());
+	if (assignment == null) {
+	    assignment = getDeviceManagement().getDeviceAssignment(invocation.getDeviceAssignmentId());
+	    if (assignment != null) {
+		assignmentsById.put(invocation.getDeviceAssignmentId(), assignment);
+	    }
+	}
 	List<IDeviceAssignment> results = new ArrayList<IDeviceAssignment>();
 	results.add(assignment);
 	return results;
