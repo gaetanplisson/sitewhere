@@ -16,15 +16,11 @@
 package com.sitewhere.commands.destination.mqtt;
 
 import java.util.List;
-import java.util.concurrent.TimeUnit;
-
-import org.fusesource.hawtdispatch.ShutdownException;
-import org.fusesource.mqtt.client.FutureConnection;
-import org.fusesource.mqtt.client.QoS;
 
 import com.sitewhere.commands.spi.ICommandDeliveryProvider;
 import com.sitewhere.communication.mqtt.IMqttConfiguration;
 import com.sitewhere.communication.mqtt.MqttLifecycleComponent;
+import com.sitewhere.communication.mqtt.MqttPublisher;
 import com.sitewhere.spi.SiteWhereException;
 import com.sitewhere.spi.device.IDeviceAssignment;
 import com.sitewhere.spi.device.IDeviceNestingContext;
@@ -40,8 +36,12 @@ import com.sitewhere.spi.microservice.lifecycle.LifecycleComponentType;
 public class MqttCommandDeliveryProvider extends MqttLifecycleComponent
 	implements ICommandDeliveryProvider<byte[], MqttParameters> {
 
-    /** Shared MQTT connection */
-    private FutureConnection connection;
+    /**
+     * Shared MQTT publisher: several messages in flight (MQTT_MAX_INFLIGHT),
+     * connection made again and messages not acknowledged published again, as the
+     * producer of echo-clock
+     */
+    private MqttPublisher publisher;
 
     public MqttCommandDeliveryProvider(IMqttConfiguration configuration) {
 	super(LifecycleComponentType.CommandDeliveryProvider, configuration);
@@ -60,8 +60,8 @@ public class MqttCommandDeliveryProvider extends MqttLifecycleComponent
 
 	getLogger().info("Connecting to MQTT broker at '" + getConfiguration().getHostname() + ":"
 		+ getConfiguration().getPort() + "'...");
-	connection = getConnection();
-	getLogger().info("Connected to MQTT broker.");
+	publisher = newPublisher();
+	publisher.tryConnect();
     }
 
     /*
@@ -72,15 +72,8 @@ public class MqttCommandDeliveryProvider extends MqttLifecycleComponent
      */
     @Override
     public void stop(ILifecycleProgressMonitor monitor) throws SiteWhereException {
-	if (connection != null) {
-	    try {
-		connection.disconnect().await();
-		connection.kill().await();
-	    } catch (ShutdownException e) {
-		getLogger().info("Dispatcher has already been shut down.");
-	    } catch (Exception e) {
-		getLogger().error("Error shutting down MQTT device event receiver.", e);
-	    }
+	if (publisher != null) {
+	    publisher.close();
 	}
 	super.stop(monitor);
     }
@@ -95,15 +88,9 @@ public class MqttCommandDeliveryProvider extends MqttLifecycleComponent
     @Override
     public void deliver(IDeviceNestingContext nested, List<? extends IDeviceAssignment> assignments,
 	    IDeviceCommandExecution execution, byte[] encoded, MqttParameters params) throws SiteWhereException {
-	try {
-	    getLogger().info("About to publish command message to topic: " + params.getCommandTopic());
-	    // PUBACK waited for: one message in flight, as the clients of the microbenchmarks
-	    connection.publish(params.getCommandTopic(), encoded, QoS.AT_LEAST_ONCE, false)
-		    .await(DEFAULT_PUBACK_TIMEOUT_SECS, TimeUnit.SECONDS);
-	    getLogger().info("Command published.");
-	} catch (Exception e) {
-	    throw new SiteWhereException("Unable to publish command to MQTT topic.", e);
-	}
+	getLogger().info("About to publish command message to topic: " + params.getCommandTopic());
+	publisher.publish(params.getCommandTopic(), encoded, false);
+	getLogger().info("Command published.");
     }
 
     /*
@@ -115,13 +102,8 @@ public class MqttCommandDeliveryProvider extends MqttLifecycleComponent
     @Override
     public void deliverSystemCommand(IDeviceNestingContext nested, List<? extends IDeviceAssignment> assignments,
 	    byte[] encoded, MqttParameters params) throws SiteWhereException {
-	try {
-	    getLogger().info("About to publish system message to topic: " + params.getSystemTopic());
-	    connection.publish(params.getSystemTopic(), encoded, QoS.AT_LEAST_ONCE, false)
-		    .await(DEFAULT_PUBACK_TIMEOUT_SECS, TimeUnit.SECONDS);
-	    getLogger().info("Command published.");
-	} catch (Exception e) {
-	    throw new SiteWhereException("Unable to publish command to MQTT topic.", e);
-	}
+	getLogger().info("About to publish system message to topic: " + params.getSystemTopic());
+	publisher.publish(params.getSystemTopic(), encoded, false);
+	getLogger().info("Command published.");
     }
 }

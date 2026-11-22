@@ -16,15 +16,10 @@
 package com.sitewhere.connectors.mqtt;
 
 import java.util.List;
-import java.util.concurrent.TimeUnit;
-
-import org.fusesource.mqtt.client.Future;
-import org.fusesource.mqtt.client.FutureConnection;
-import org.fusesource.mqtt.client.MQTT;
-import org.fusesource.mqtt.client.QoS;
 
 import com.sitewhere.communication.mqtt.MqttConfigurer;
 import com.sitewhere.communication.mqtt.MqttLifecycleComponent;
+import com.sitewhere.communication.mqtt.MqttPublisher;
 import com.sitewhere.connectors.SerialOutboundConnector;
 import com.sitewhere.connectors.configuration.connector.MqttOutboundConnectorConfiguration;
 import com.sitewhere.connectors.spi.IMulticastingOutboundConnector;
@@ -54,11 +49,12 @@ public class MqttOutboundConnector extends SerialOutboundConnector implements IM
     /** Topic */
     private String topic;
 
-    /** MQTT client */
-    private MQTT mqtt;
-
-    /** Shared MQTT connection */
-    private FutureConnection connection;
+    /**
+     * Shared MQTT publisher: several messages in flight (MQTT_MAX_INFLIGHT),
+     * connection made again and messages not acknowledged published again, as the
+     * producer of echo-clock
+     */
+    private MqttPublisher publisher;
 
     /** Multicaster for events */
     private IDeviceEventMulticaster<String> multicaster;
@@ -96,20 +92,13 @@ public class MqttOutboundConnector extends SerialOutboundConnector implements IM
 	}
 
 	// Use common MQTT configuration setup.
-	this.mqtt = MqttConfigurer.configure(getConfiguration());
-
 	getLogger().info(String.format("Connecting to MQTT broker at %s:%s ...", getConfiguration().getHostname(),
 		getConfiguration().getPort()));
-	connection = mqtt.futureConnection();
-	try {
-	    Future<Void> future = connection.connect();
-	    future.await(MqttLifecycleComponent.DEFAULT_CONNECT_TIMEOUT_SECS, TimeUnit.SECONDS);
-	    getLogger().info(String.format("Connected. Events will be forwarded to topic '%s'.",
-		    getConfiguration().getOutboundTopic()));
-	} catch (Exception e) {
-	    throw new SiteWhereException("Unable to connect to MQTT broker.", e);
-	}
-	getLogger().info("Connected to MQTT broker.");
+	publisher = new MqttPublisher(MqttConfigurer.configure(getConfiguration()),
+		MqttLifecycleComponent.getMaxInflight());
+	publisher.tryConnect();
+	getLogger().info(
+		String.format("Events will be forwarded to topic '%s'.", getConfiguration().getOutboundTopic()));
     }
 
     /*
@@ -129,13 +118,8 @@ public class MqttOutboundConnector extends SerialOutboundConnector implements IM
 	    routeBuilder.lifecycleStop(monitor);
 	}
 
-	if (connection != null) {
-	    try {
-		connection.disconnect();
-		connection.kill();
-	    } catch (Exception e) {
-		getLogger().error("Error shutting down MQTT device event receiver.", e);
-	    }
+	if (publisher != null) {
+	    publisher.close();
 	}
 	super.stop(monitor);
     }
@@ -228,16 +212,7 @@ public class MqttOutboundConnector extends SerialOutboundConnector implements IM
      * @throws SiteWhereException
      */
     protected void publish(IDeviceEvent event, String topic) throws SiteWhereException {
-	// PUBACK waited for: one message in flight (the connector is serial), as the
-	// clients of the microbenchmarks
-	try {
-	    connection.publish(topic, MarshalUtils.marshalJson(event), QoS.AT_LEAST_ONCE, false)
-		    .await(MqttLifecycleComponent.DEFAULT_PUBACK_TIMEOUT_SECS, TimeUnit.SECONDS);
-	} catch (SiteWhereException e) {
-	    throw e;
-	} catch (Exception e) {
-	    throw new SiteWhereException("Unable to publish event to MQTT topic " + topic + ".", e);
-	}
+	publisher.publish(topic, MarshalUtils.marshalJson(event), false);
     }
 
     /*
