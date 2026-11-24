@@ -104,10 +104,10 @@ public class DefaultCommandProcessingStrategy extends TenantEngineLifecycleCompo
 	 */
 	@Override
 	public void runAsSystemUser() throws SiteWhereException {
-	    IDeviceCommand command = commandsById.get(invocation.getDeviceCommandId());
+	    IDeviceCommand command = LocalCaches.ENABLED ? commandsById.get(invocation.getDeviceCommandId()) : null;
 	    if (command == null) {
 		command = getDeviceManagement().getDeviceCommand(invocation.getDeviceCommandId());
-		if (command != null) {
+		if (LocalCaches.ENABLED && command != null) {
 		    commandsById.put(invocation.getDeviceCommandId(), command);
 		}
 	    }
@@ -115,10 +115,10 @@ public class DefaultCommandProcessingStrategy extends TenantEngineLifecycleCompo
 		IDeviceCommandExecution execution = getCommandExecutionBuilder().createExecution(command, invocation);
 		List<IDeviceAssignment> assignments = getCommandTargetResolver().resolveTargets(invocation);
 		for (IDeviceAssignment assignment : assignments) {
-		    IDevice device = devicesById.get(assignment.getDeviceId());
+		    IDevice device = LocalCaches.ENABLED ? devicesById.get(assignment.getDeviceId()) : null;
 		    if (device == null) {
 			device = getDeviceManagement().getDevice(assignment.getDeviceId());
-			if (device != null) {
+			if (LocalCaches.ENABLED && device != null) {
 			    devicesById.put(assignment.getDeviceId(), device);
 			}
 		    }
@@ -126,10 +126,10 @@ public class DefaultCommandProcessingStrategy extends TenantEngineLifecycleCompo
 			throw new SiteWhereException("Targeted assignment references device that does not exist.");
 		    }
 
-		    List<? extends IDeviceAssignment> active = assignmentsByDevice.get(device.getId());
+		    List<? extends IDeviceAssignment> active = LocalCaches.ENABLED ? assignmentsByDevice.get(device.getId()) : null;
 		    if (active == null) {
 			active = getDeviceManagement().getActiveDeviceAssignments(device.getId());
-			if (!active.isEmpty()) {
+			if (LocalCaches.ENABLED && !active.isEmpty()) {
 			    assignmentsByDevice.put(device.getId(), active);
 			}
 		    }

@@ -52,10 +52,10 @@ public class DefaultCommandTargetResolver extends TenantEngineLifecycleComponent
      */
     @Override
     public List<IDeviceAssignment> resolveTargets(IDeviceCommandInvocation invocation) throws SiteWhereException {
-	IDeviceAssignment assignment = assignmentsById.get(invocation.getDeviceAssignmentId());
+	IDeviceAssignment assignment = LocalCaches.ENABLED ? assignmentsById.get(invocation.getDeviceAssignmentId()) : null;
 	if (assignment == null) {
 	    assignment = getDeviceManagement().getDeviceAssignment(invocation.getDeviceAssignmentId());
-	    if (assignment != null) {
+	    if (LocalCaches.ENABLED && assignment != null) {
 		assignmentsById.put(invocation.getDeviceAssignmentId(), assignment);
 	    }
 	}

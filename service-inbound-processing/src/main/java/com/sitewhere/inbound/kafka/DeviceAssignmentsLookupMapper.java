@@ -100,10 +100,10 @@ public class DeviceAssignmentsLookupMapper
 	    final Histogram.Timer assignmentLookupTime = ASSIGNMENT_LOOKUP_TIMER.labels(getTenantEngine().buildLabels())
 		    .startTimer();
 	    try {
-		List<? extends IDeviceAssignment> assignments = assignmentsByDevice.get(context.getDevice().getId());
+		List<? extends IDeviceAssignment> assignments = LocalCaches.ENABLED ? assignmentsByDevice.get(context.getDevice().getId()) : null;
 		if (assignments == null) {
 		    assignments = getDeviceManagement().getActiveDeviceAssignments(context.getDevice().getId());
-		    if (!assignments.isEmpty()) {
+		    if (LocalCaches.ENABLED && !assignments.isEmpty()) {
 			assignmentsByDevice.put(context.getDevice().getId(), assignments);
 		    }
 		}

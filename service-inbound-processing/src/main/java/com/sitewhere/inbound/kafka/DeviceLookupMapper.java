@@ -99,10 +99,10 @@ public class DeviceLookupMapper
 		    .startTimer();
 	    try {
 		InboundEventContext context = new InboundEventContext(payload);
-		IDevice existing = devicesByToken.get(payload.getDeviceToken());
+		IDevice existing = LocalCaches.ENABLED ? devicesByToken.get(payload.getDeviceToken()) : null;
 		if (existing == null) {
 		    existing = getDeviceManagement().getDeviceByToken(payload.getDeviceToken());
-		    if (existing != null) {
+		    if (LocalCaches.ENABLED && existing != null) {
 			devicesByToken.put(payload.getDeviceToken(), existing);
 		    }
 		}
