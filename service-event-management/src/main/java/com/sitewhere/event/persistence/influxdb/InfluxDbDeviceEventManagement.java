@@ -27,6 +27,7 @@ import com.sitewhere.event.influxwrite.InfluxSubscriptionManager;
 import com.sitewhere.event.persistence.DeviceEventManagementPersistence;
 import com.sitewhere.event.spi.microservice.IEventManagementMicroservice;
 import com.sitewhere.influxdb.InfluxDbClient;
+import com.sitewhere.influxdb.InfluxDbConfiguration;
 import com.sitewhere.microservice.api.device.IDeviceManagement;
 import com.sitewhere.microservice.api.event.IDeviceEventManagement;
 import com.sitewhere.microservice.lifecycle.TenantEngineLifecycleComponent;
@@ -75,6 +76,9 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
     /** Client */
     private InfluxDbClient client;
 
+    /** Client for command invocations (env SITEWHERE_INFLUX_COMMANDS_HOST="host[:port]", else same as client) */
+    private InfluxDbClient commandClient;
+
     /**
      * Prefix to compare against when adding user defined tags from assignment meta
      * data
@@ -88,6 +92,26 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
     public InfluxDbDeviceEventManagement(InfluxDbClient client) {
 	super(LifecycleComponentType.DataStore);
 	this.client = client;
+	this.commandClient = createCommandClient(client, System.getenv("SITEWHERE_INFLUX_COMMANDS_HOST"));
+    }
+
+    protected static InfluxDbClient createCommandClient(InfluxDbClient client, String address) {
+	if (address == null || address.isEmpty()) {
+	    return client;
+	}
+	InfluxDbConfiguration src = client.getConfiguration(), cfg = new InfluxDbConfiguration(client);
+	String[] hostPort = address.split(":");
+	cfg.setHostname(hostPort[0]);
+	cfg.setPort(hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : src.getPort());
+	cfg.setUsername(src.getUsername());
+	cfg.setPassword(src.getPassword());
+	cfg.setDatabase(src.getDatabase());
+	cfg.setRetention(src.getRetention());
+	cfg.setEnableBatch(src.isEnableBatch());
+	cfg.setBatchChunkSize(src.getBatchChunkSize());
+	cfg.setBatchIntervalMs(src.getBatchIntervalMs());
+	cfg.setLogLevel(src.getLogLevel());
+	return new InfluxDbClient(cfg);
     }
 
     /*
@@ -98,6 +122,7 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
     @Override
     public void initializeParameters() throws SiteWhereException {
 	getClient().initializeParameters();
+	if (commandClient != client) commandClient.initializeParameters();
     }
 
     /*
@@ -107,6 +132,7 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
     @Override
     public void initialize(ILifecycleProgressMonitor monitor) throws SiteWhereException {
 	getClient().initialize(monitor);
+	if (commandClient != client) commandClient.initialize(monitor);
     }
 
     /*
@@ -119,7 +145,11 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
     @Override
     public void start(ILifecycleProgressMonitor monitor) throws SiteWhereException {
 	getClient().start(monitor);
-	ensureOutboundSubscription();
+	ensureOutboundSubscription(getClient());
+	if (commandClient != client) {
+	    commandClient.start(monitor);
+	    ensureOutboundSubscription(commandClient);
+	}
     }
 
     /**
@@ -129,8 +159,8 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
      * logged, not thrown: persistence keeps working, but nothing reaches outbound
      * until the subscription exists.
      */
-    protected void ensureOutboundSubscription() {
-	String database = getClient().getConfiguration().getDatabase();
+    protected void ensureOutboundSubscription(InfluxDbClient client) {
+	String database = client.getConfiguration().getDatabase();
 	try {
 	    IMicroservice<?, ?> microservice = getTenantEngine().getMicroservice();
 	    String destination = InfluxSubscriptionManager.resolveDestination(
@@ -144,8 +174,8 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
 			InfluxSubscriptionManager.DESTINATION_ENV));
 		return;
 	    }
-	    String retention = getClient().getConfiguration().getRetention();
-	    InfluxSubscriptionManager.Action action = new InfluxSubscriptionManager(getClient().getInflux()::query)
+	    String retention = client.getConfiguration().getRetention();
+	    InfluxSubscriptionManager.Action action = new InfluxSubscriptionManager(client.getInflux()::query)
 		    .ensureSubscription(database, retention, destination);
 	    getLogger().info(String.format("InfluxDB subscription '%s' on \"%s\".\"%s\" -> %s: %s",
 		    InfluxSubscriptionManager.SUBSCRIPTION_NAME, database, retention, destination, action));
@@ -360,7 +390,7 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
 	    Point.Builder builder = InfluxDbDeviceEvent.createBuilder();
 	    InfluxDbDeviceCommandInvocation.saveToBuilder(ci, builder);
 	    addUserDefinedTags(context, builder);
-	    getClient().getInflux().write(getClient().getConfiguration().getDatabase(),
+	    commandClient.getInflux().write(commandClient.getConfiguration().getDatabase(),
 		    getAssignmentSpecificRetentionPolicy(context), builder.build());
 	    result.add(ci);
 	}
@@ -377,7 +407,7 @@ public class InfluxDbDeviceEventManagement extends TenantEngineLifecycleComponen
     public ISearchResults<IDeviceCommandInvocation> listDeviceCommandInvocationsForIndex(DeviceEventIndex index,
 	    List<UUID> entityIds, IDateRangeSearchCriteria criteria) throws SiteWhereException {
 	return InfluxDbDeviceEvent.searchByIndex(index, entityIds, DeviceEventType.CommandInvocation, criteria,
-		getClient(), IDeviceCommandInvocation.class);
+		commandClient, IDeviceCommandInvocation.class);
     }
 
     /*
